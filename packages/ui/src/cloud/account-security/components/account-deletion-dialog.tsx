@@ -1,5 +1,6 @@
 /** Renders the confirmation and status flow for permanent account-deletion requests. */
 
+import type { AccountDeletionStatusDto } from "@elizaos/cloud-shared/types/account-lifecycle";
 import { useState } from "react";
 import {
   AlertDialog,
@@ -19,10 +20,10 @@ import {
 
 export function AccountDeletionDialog({
   triggerLabel = "Delete account",
-  onScheduled,
+  onAccepted,
 }: {
   triggerLabel?: string;
-  onScheduled?: (requestId: string) => void;
+  onAccepted?: (request: AccountDeletionStatusDto) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [confirmation, setConfirmation] = useState("");
@@ -33,15 +34,15 @@ export function AccountDeletionDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const request = await submitAccountDeletion();
+      const accepted = await submitAccountDeletion();
       await endLocalSessionAfterDeletion();
-      onScheduled?.(request.requestId);
-      if (!onScheduled && typeof window !== "undefined") {
-        window.location.assign(
-          `/account-deletion?requested=${encodeURIComponent(request.requestId)}`,
-        );
+      onAccepted?.(accepted.request);
+      if (!onAccepted && typeof window !== "undefined") {
+        window.location.assign("/account-deletion");
       }
     } catch (cause) {
+      // error-policy:J4 request failure remains visibly distinct and leaves
+      // the confirmation dialog open for a safe retry.
       setError(
         cause instanceof Error
           ? cause.message
@@ -70,9 +71,11 @@ export function AccountDeletionDialog({
             </AlertDialogTitle>
             <AlertDialogDescription>
               Access is disabled immediately. Your Steward identity and
-              associated Eliza Cloud data are scheduled for deletion within 30
-              days. Limited transaction, fraud, tax, or security records may be
-              retained when legally required. This cannot be undone.
+              associated Eliza Cloud data enter a 30-day recovery window before
+              irreversible deletion. You can download the export when it is
+              ready or cancel from the account-deletion page during that window.
+              Limited transaction, fraud, tax, or security records may be
+              retained when legally required.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <label

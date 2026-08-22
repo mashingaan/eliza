@@ -351,6 +351,12 @@ const CLOUD_AUDIT_CASES: CloudAuditCase[] = [
     route: "privacy-policy",
     auth: PUBLIC,
   },
+  {
+    slug: "account-deletion",
+    path: "/account-deletion",
+    route: "account-deletion",
+    auth: PUBLIC,
+  },
   { slug: "bsc", path: "/bsc", route: "bsc", auth: PUBLIC },
   // api-explorer/
   {
