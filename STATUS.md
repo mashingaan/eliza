@@ -19,6 +19,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Bounded local completion-audit cleanup: `8b4009f72bda8dff2f9fccd77f23a006135a9f73`; tag `account-deletion-local-completion-audit-20260822` points at the following ledger checkpoint.
 - Disposable S3-compatible object-purge proof uses the repository's hard-gated loopback suite and local MinIO image `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`; tag `account-deletion-local-s3-proof-20260822` points at this evidence ledger checkpoint.
 - Authoritative remote-spool fence: `ca0509ad5f7ec161f0d72428296790c801e39b67`; tag `account-deletion-spool-authority-fence-20260822` points at the following ledger checkpoint.
+- Resumed local lifecycle QA repaired the auto-top-up webhook test harness at `0633bbd46252edd0b0a023d0769accb1a58246fa` and checkpointed primary lifecycle session/API-key fencing plus the disposable full-stack deletion journey at `a58db77fa004dd09b982625e921dd29dff480e21`; tag `account-deletion-local-lifecycle-qa-20260822` points at the following ledger checkpoint.
 - Audited issue #23098, merged fail-closed PR #22854 / `c276ccf007dd8f1e6102b8d5799b5ec6109394ef`, UI-only draft PRs #24253/#24256, applicable repository/package guides, schema ownership, and current migration tail.
 - Claimed the Cloud/Security implementation lane on issue #23098: https://github.com/elizaOS/eliza/issues/23098#issuecomment-5378961151.
 - Classified all 215 direct user/organization foreign-key edges with a fail-closed digest-pinned runtime policy: 69 external reconciliation, 10 shared transfer, remaining cascade/anonymize; unknown restrictive edges fail tests. Digest: `15534d017ba7c2a8414b4831ded62b8fe6256daca279115c56c48eacf62e0e3a`.
@@ -55,15 +56,16 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Doing
 
-- Local implementation and audit are parked clean. The bounded encrypted export/download, recovery capability, generic public page, lifecycle authority, cancellation contract, renewal/provisioning fences, and atomic terminal database transaction are checkpointed.
+- Local implementation and audit are parked at a tagged, clean candidate. The bounded encrypted export/download, recovery capability, generic public page, lifecycle authority, cancellation contract, renewal/provisioning fences, atomic terminal database transaction, and primary-read auth fence are checkpointed.
 - Default adapters cover Steward, Stripe, domains, backup catalogue objects, compute/containers, GitHub/apps, connector OAuth, voice credentials, primary object storage, Vault bindings, and discovered grants. Remote spool absence can no longer be inferred from local backup rows: the phase requires a canonical `AccountDeletionSpoolAuthority`, passes through the saga idempotency key, and fails closed when unwired.
 
 ## Next
 
-1. Android consumes the tagged typed `canceling`/`accessState` contract; no Android files were edited here.
-2. The shared staging owner serializes this exact source into a disposable non-production environment with both backup-store authorities and a real spool reconciler configured.
-3. Provider owners exercise disposable Steward, Stripe, compute/container, GitHub/repo, connector, voice, domain, R2/backup, Vault/key, and grant fixtures, including lost-response reconciliation and verified absence.
-4. After staged final-absence evidence, prepare publication/review with Cloud, Security, SRE, Steward, billing, Android, and provider owners. Production deployment, migration, push, merge, and real-user deletion remain unauthorized.
+1. Reconcile this tagged source with the current `origin/develop` under the shared staging owner's serialization; this branch is intentionally not rebased during the local audit.
+2. Android consumes the tagged typed `canceling`/`accessState` contract; no Android files were edited here.
+3. The shared staging owner deploys only the approved exact source to an isolated disposable non-production environment, advances migrations `0300`-`0303` through the normal guarded rollout, and captures health plus rollback evidence.
+4. Provider owners wire both backup-store authorities and the canonical spool reconciler, then exercise disposable Steward, Stripe, compute/container, GitHub/repo, connector, voice, domain, R2/backup, Vault/key, and grant fixtures, including lost-response reconciliation and verified absence.
+5. After staged final-absence evidence, prepare publication/review with Cloud, Security, SRE, Steward, billing, Android, and provider owners. Production deployment, migration, push, merge, and real-user deletion remain unauthorized.
 
 ## Reused prior work
 
@@ -73,6 +75,11 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Tests and evidence
 
+- Resumed disposable local audit: Cloud shared deletion/auth/migration/repository/export/saga/provider/resource/fencing matrix 225/225 with 858 assertions; Cloud API deletion routes 12/12; auto-top-up route/webhook 23/23; migration runner/barrier/identity suites 16/16 with 74 assertions; staging-canary guard contracts 12/12; generic UI deletion client/panels 16/16.
+- Real local Worker + PGlite + loopback Steward Playwright journey passes 1/1: exact confirmation, immutable distinct status/recovery capabilities, reservation, immediate user/org/API-key/session fence, post-session public status, cross-tenant preservation, cancel-during-provider-work, nonterminal `canceling` DTO, Steward reconciliation, and continued Cloud fence until export/provider cleanup. The runner's release-barrier acknowledgement is accepted only for `NODE_ENV=test`, `CLOUD_E2E=1`, and PGlite/loopback PostgreSQL; remote or production targets fail closed.
+- The full-stack journey exposed and fixed a stale-cache authorization defect: session and API-key boundaries now primary-read organization lifecycle authority before returning access. Focused auth proof passes 30/30 with 73 assertions, including rejection of a cached active identity after deletion reservation and production-disabled signed test recent-auth behavior.
+- Resumed public-page readiness proof passes the focused desktop/mobile audit 2/2; both exact captures were manually inspected as readable with no visible overflow or layout break. No staging, MinIO, hosted object store, provider, or production state was contacted during this resumed audit.
+- Cloud shared, Cloud API, Cloud e2e, and Cloud test-mocks typechecks pass; the Cloud API production Worker build passes in dry-run mode only. Focused Biome, `git diff --check`, and redacted Gitleaks diff scanning pass.
 - Bounded exact-head audit: shared contract/migration/repository/saga/export/resource suites 47/47 with 197 assertions; renewal/provisioning boundary suites 69/69 with 324 assertions; cancellation/authority/auto-top-up regression suites 80/80 with 276 assertions; API routes 12/12 with 32 assertions; isolated database integrations 4/4 with 18 assertions; staging-canary guard contracts 12/12 with 75 assertions; UI deletion client/panels 16/16.
 - Terminal erasure repository suite now passes 10/10 with 77 assertions, including completed identifier-free receipt retention and restrictive-FK rollback.
 - Disposable object-store integration passes 1/1 with 5 assertions against MinIO bound only to `127.0.0.1:59000`: exact organization path-segment and metadata ownership were erased while another tenant and substring-only keys remained. The one-off container and its ephemeral data were removed after the run.
@@ -99,11 +106,13 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Remaining gates
 
+- Exact-source serialization is required before hosted testing because this lane deliberately did not fetch/rebase or overwrite concurrent work. The shared staging owner must reconcile the tagged candidate with current `origin/develop`, record the resulting immutable source, and approve the disposable deployment.
 - The saga authority and default adapter candidate are committed, but `secondary_backups` requires an injected `AgentBackupObjectStoreRegistry`; without it the adapter returns `BACKUP_STORAGE_AUTHORITY_UNAVAILABLE`. The `spools` phase now always requires an injected canonical `AccountDeletionSpoolAuthority`; without it the adapter returns `BACKUP_SPOOL_AUTHORITY_UNAVAILABLE`, even when local backup rows are absent. The Cloud cron currently injects neither authority, so these are exact fail-closed composition/provider-owner gates.
 - The disposable S3-compatible suite is locally proven, but no hosted R2 or secondary-backup provider erasure or absence claim is made.
 - The local terminal transaction and full-schema FK classification are green, but complete disposable hosted final absence across PostgreSQL, both object stores/backups, spools, Steward, billing, compute, GitHub, connectors, voice, domains, Vault/keys, and grants remains required.
-- Full authenticated recovery/export interaction recording still requires a disposable staged account; the anonymous external route has focused desktop/mobile visual proof.
-- Disposable staging source/deploy serialization with the shared staging owner and canonical non-production fixtures.
+- Hosted acceptance must seed a disposable personal account plus a two-owner shared organization with an active successor, subscription/auto-top-up, agents/apps/containers, connector and voice credentials, domains, files/media, grants, and objects in both backup stores/spools. It must exercise authenticated app and public-page request, exact reauth/confirmation, post-session status, encrypted export/digest verification, transfer/exit, cancellation during provider work, terminal reactivation, replay/CSRF/IDOR/cross-tenant isolation, stale callbacks, outages, lost responses, restarts, and stale leases.
+- The disposable account must then cross recovery expiry and prove transactional identifier nulling plus verified irreversible absence in PostgreSQL, primary object storage/R2, secondary backups/spools, and every provider, retaining only the bounded non-identifying receipt. Full authenticated interaction recording and redacted database/provider receipts remain hosted gates; the anonymous external route has focused desktop/mobile visual proof.
+- Hosted evidence must include exact health, migration/rollback records, provider/database phase receipts, redacted logs, and the repository evidence bundle for the immutable disposable source.
 - Android must consume and verify the stable nonterminal `canceling` contract before Play-facing acceptance; this lane did not mutate Android or claim Play acceptance.
 - Independent Cloud, Security, SRE, Steward, billing, and provider-owner review.
 - No production deployment, migration, push, merge, or real-user deletion is authorized.
