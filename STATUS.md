@@ -13,6 +13,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Exact current-develop export/UI candidate: `98dcb1baacc6b72402fdd855c8957e775cb1d7f2`, tag `account-deletion-export-ui-candidate-20260822`; parent base `origin/develop@a40cc65d3f`.
 - Durable saga/cancellation checkpoint: `00e8008de9a308eb6da58614a14c770bb8250f9f` (tagged by the following ledger checkpoint as `account-deletion-fenced-saga-20260822`).
 - Restart-safe cancellation reconciliation: `5b1e51e7b098449fe38ac991d4af8cc63286e715`.
+- Domain-renewal lifecycle fence: `e996bef3b0f6dddff403bca56dc0c766a70b311c`.
 - Audited issue #23098, merged fail-closed PR #22854 / `c276ccf007dd8f1e6102b8d5799b5ec6109394ef`, UI-only draft PRs #24253/#24256, applicable repository/package guides, schema ownership, and current migration tail.
 - Claimed the Cloud/Security implementation lane on issue #23098: https://github.com/elizaOS/eliza/issues/23098#issuecomment-5378961151.
 - Classified all 215 direct user/organization foreign-key edges with a fail-closed digest-pinned runtime policy: 69 external reconciliation, 10 shared transfer, remaining cascade/anonymize; unknown restrictive edges fail tests. Digest: `15534d017ba7c2a8414b4831ded62b8fe6256daca279115c56c48eacf62e0e3a`.
@@ -26,6 +27,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Lost object-write responses enter `reconciling`; a later generation reads and verifies the existing object before committing and never repeats the put. Confirmed provider absence is the only path back to a build retry.
 - Cancellation and expiry schedule an `export_revoke` receipt after a 15-minute safety delay that outlives the five-minute export lease. R2 delete success with a lost response is reconciled by confirmed absence without repeating delete; completion atomically nulls content/size and records only the deletion receipt digest.
 - Added final-boundary auto-top-up lifecycle/revision checks before authorization and immediately before Stripe.
+- Domain renewals now capture active lifecycle authority before debit and recheck the exact revision immediately before Cloudflare. A revision/state change refunds the debit and returns `lifecycle_fenced` without calling the registrar.
 - Preserved the legacy due-worker `LIFECYCLE_RESERVATION_REQUIRED` fence; irreversible personal erasure is not enabled prematurely.
 - Added ordered generation-fenced provider phases, durable before-call markers, immutable idempotency keys, retry classes, leases, canonical-state reconciliation, and transactional terminal erasure with identifier nulling. A lost provider response is inspected before any later mutation; an inspection outage remains reconciling.
 - Added a distinct nonterminal `canceling` state. Cancellation keeps organization/user/auth/paid-work fences active and leaves existing sessions and API keys revoked. Only completed `steward_reactivation` and `export_revoke` receipts permit a locked lifecycle-revision increment and terminal `canceled` publication.
@@ -67,6 +69,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Exact-head focused backend/migration proof: 47/47 pass: export 7, lifecycle service 11, real PGlite reservation/concurrency/export fencing 6, full-schema FK policy 3, migration application 3, migration journal 5, public status/request/undo route 6, authenticated route 3, export route 3.
 - Saga/cancellation checkpoint proof: 32/32 pass across public route 6, provider saga lost-response/stale-generation 3, lifecycle service 11, migration application 4, and real PGlite reservation/cancellation/expiry concurrency 8; 134 assertions. Cloud shared typecheck and Cloud API typecheck/production Worker dry-run pass.
 - Restart-safe cancellation proof: lifecycle/PGlite focused suites 21/21 pass with 103 assertions; Cloud shared, Cloud test-mocks, and Cloud API typechecks pass, including the Worker dry-run bundle.
+- Domain renewal boundary proof: 12/12 pass with 37 assertions, including pre-debit deletion fencing and post-debit revision-change refund/no-provider-call; Cloud shared typecheck passes.
 - Correct Vitest UI client command passes 5/5. Direct Bun execution of that Vitest file fails before tests because Bun's compatibility layer lacks `vi.hoisted`; this is a runner mismatch, not a product failure.
 - Generic UI/client: 16/16 pass under Vitest, including capability persistence, no query-parameter authority, exact undo/export confirmations, and client-side SHA-256 mismatch rejection.
 - Focused Biome check across all changed backend/UI files: pass.
