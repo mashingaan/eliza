@@ -417,8 +417,7 @@ export class AutoTopUpService {
       dependencies.rolloutEnabled ??
       (() => getCloudAwareEnv().AUTO_TOP_UP_DURABLE_ENABLED === "true");
     this.customerAuthority = dependencies.customerAuthority ?? stripeCustomerAuthorityService;
-    this.lifecycleAuthority =
-      dependencies.lifecycleAuthority ?? readOrganizationLifecycleAuthority;
+    this.lifecycleAuthority = dependencies.lifecycleAuthority ?? readOrganizationLifecycleAuthority;
   }
 
   validateSettings(amount: number, threshold: number): void {
@@ -939,9 +938,7 @@ export class AutoTopUpService {
       return this.finishSucceededAttempt(attempt, leaseToken, recovered);
     }
 
-    const preAuthorizationLifecycle = await this.lifecycleAuthority(
-      attempt.organizationId,
-    );
+    const preAuthorizationLifecycle = await this.lifecycleAuthority(attempt.organizationId);
     if (!organizationLifecycleAllowsNewWork(preAuthorizationLifecycle)) {
       return this.cancelAttempt(
         attempt,
@@ -990,9 +987,7 @@ export class AutoTopUpService {
     }
 
     try {
-      const finalLifecycle = await this.lifecycleAuthority(
-        attempt.organizationId,
-      );
+      const finalLifecycle = await this.lifecycleAuthority(attempt.organizationId);
       if (
         !organizationLifecycleAllowsNewWork(finalLifecycle) ||
         finalLifecycle.revision !== preAuthorizationLifecycle.revision
