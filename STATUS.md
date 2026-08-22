@@ -8,6 +8,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Exact starting base: `origin/develop@d54d91ea36d217ad8d1bf2c1d47b7dcd91183111`. Preserved detached snapshot `e58da6bfe0495709dc4844c30e39b32d706e8590`; no reset, clean, push, deploy, or other-worktree mutation.
 - Lifecycle-authority checkpoint: `d9061c1e08b3f30f1f971464687577481094585a`, tag `account-deletion-lifecycle-authority-20260822`.
 - Encrypted-export contract checkpoint: `496d77baefc5ef57cfe6a900be572c374883382b`, tag `account-deletion-encrypted-export-contract-20260822`.
+- Generic public UI checkpoint: `c71a5932c886141c618d3c2b1daea5f2c34b6675`, tag `account-deletion-public-ui-20260822`.
 - Audited issue #23098, merged fail-closed PR #22854 / `c276ccf007dd8f1e6102b8d5799b5ec6109394ef`, UI-only draft PRs #24253/#24256, applicable repository/package guides, schema ownership, and current migration tail.
 - Claimed the Cloud/Security implementation lane on issue #23098: https://github.com/elizaOS/eliza/issues/23098#issuecomment-5378961151.
 - Classified all 215 direct user/organization foreign-key edges with a fail-closed digest-pinned runtime policy: 69 external reconciliation, 10 shared transfer, remaining cascade/anonymize; unknown restrictive edges fail tests. Digest: `15534d017ba7c2a8414b4831ded62b8fe6256daca279115c56c48eacf62e0e3a`.
@@ -36,14 +37,14 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Doing
 
-- Keep the generic public page and browser client aligned with checkpoint `496d77baef`; UI files remain intentionally outside the atomic backend contract commit.
-- Finish focused UI visual evidence and create a separate UI checkpoint without touching Android-native files.
+- The bounded encrypted export/download, recovery capability, generic public page, and browser client are locally checkpointed. Preserve this exact candidate for isolated staging serialization.
+- Keep the broader irreversible provider/terminal-erasure saga fail-closed; it is not part of the completed export/UI checkpoint and must not be represented as complete.
 
 ## Next
 
-1. Checkpoint the generic external page/client after focused visual proof.
+1. Coordinate exact source `c71a5932c886141c618d3c2b1daea5f2c34b6675` with the shared staging owner before any non-production deployment.
 2. Continue the separately gated provider saga and terminal erasure work only within #23098 authority; do not weaken the legacy fail-closed fence.
-3. Exercise disposable staging only after exact-source serialization with the shared staging owner.
+3. Exercise disposable staging fixtures and final-absence proof only after source serialization.
 4. Produce rollout/rollback/runbook, focused draft PR metadata, and the Cloud/Security/SRE/Steward/billing/provider reviewer matrix.
 
 ## Reused prior work
@@ -62,14 +63,14 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - UI-wide typecheck has one unchanged environment baseline failure at `packages/ui/src/bridge/storage-bridge.ts:53`: missing `@elizaos/capacitor-secure-store` type/module; focused UI tests are clean.
 - Direct Bun execution is not a valid runner for the two Vitest UI files because Bun lacks `vi.hoisted`; the correct Vitest run passes 16/16.
 - The repository's coverage-enabled Bun PGlite run passes assertions but its coverage writer can fail with Bun `WriteFailed`; the identical suite passes 6/6 with an explicit disposable no-coverage Bun config.
-- App visual audit was started and reached 47 green captures/tests, then intentionally stopped by this task to prioritize the requested atomic backend handoff; no failure was observed before interruption. Full focused UI evidence remains pending.
+- The broad app-view audit was stopped after 47 green captures/tests to prioritize the atomic backend handoff. The correct focused Cloud audit then passed the actual `/account-deletion` route at desktop and mobile: 2/2, no console errors, banned blue, hover violations, or screenshot-quality issues. Both captures were manually inspected and found readable with no visible overflow/layout break.
 - Earlier Drizzle generation was blocked before generation by existing `ERR_PACKAGE_PATH_NOT_EXPORTED` for `packages/core/node_modules/@elizaos/prompts/package.json`; migrations were reviewed append-only and independently applied in isolated PGlite.
 - Staging mutations, provider calls, production mutations, real-user/account deletion, push, merge, deploy, and PR/Play state changes: none.
 
 ## Remaining gates
 
 - The atomic backend export contract is committed, but complete external provider adapters, final anonymization/erasure, and isolated-staging final-absence proof remain open under issue #23098.
-- Generic public UI visual completion and separate local checkpoint.
+- Full authenticated recovery/export interaction recording still requires a disposable staged account; the anonymous external route has focused desktop/mobile visual proof.
 - Disposable staging source/deploy serialization with the shared staging owner and canonical non-production fixtures.
 - Independent Cloud, Security, SRE, Steward, billing, and provider-owner review.
 - No production deployment, migration, push, merge, or real-user deletion is authorized.
