@@ -3,7 +3,7 @@
 import { Hono } from "hono";
 import { failureResponse } from "@/lib/api/cloud-worker-errors";
 import { checkElizaMutatingRequestOrigin } from "@/lib/auth/browser-origin-policy";
-import { requireUserWithOrg } from "@/lib/auth/workers-hono-auth";
+import { requireRecentSessionUserWithOrg } from "@/lib/auth/workers-hono-auth";
 import {
   RateLimitPresets,
   rateLimit,
@@ -22,7 +22,7 @@ app.use("*", rateLimit(RateLimitPresets.STANDARD));
 
 app.get("/", async (c) => {
   try {
-    const user = await requireUserWithOrg(c);
+    const user = await requireRecentSessionUserWithOrg(c);
     const request = await getOpenAccountDeletionRequest(user.id);
     return c.json({
       request: request ? toAccountDeletionRequestDto(request) : null,
@@ -46,7 +46,7 @@ app.post("/", async (c) => {
   }
 
   try {
-    const user = await requireUserWithOrg(c);
+    const user = await requireRecentSessionUserWithOrg(c);
     if (!user.steward_id) {
       return c.json(
         {
@@ -72,15 +72,18 @@ app.post("/", async (c) => {
       );
     }
 
-    const request = await requestAccountDeletion({
+    const accepted = await requestAccountDeletion({
       userId: user.id,
       organizationId: user.organization_id,
       stewardUserId: user.steward_id,
     });
-    return c.json({ request: toAccountDeletionRequestDto(request) }, 202);
+    return c.json(accepted, 202);
   } catch (error) {
     if (error instanceof AccountDeletionConflictError) {
-      return c.json({ error: error.message, code: error.code }, 409);
+      return c.json(
+        { error: error.message, code: error.code, details: error.details },
+        409,
+      );
     }
     // error-policy:J1 The HTTP boundary logs and translates unexpected service failures.
     logger.error("[AccountDeletionRoute] Failed to schedule deletion", {
