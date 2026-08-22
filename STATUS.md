@@ -9,6 +9,8 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Lifecycle-authority checkpoint: `d9061c1e08b3f30f1f971464687577481094585a`, tag `account-deletion-lifecycle-authority-20260822`.
 - Encrypted-export contract checkpoint: `496d77baefc5ef57cfe6a900be572c374883382b`, tag `account-deletion-encrypted-export-contract-20260822`.
 - Generic public UI checkpoint: `c71a5932c886141c618d3c2b1daea5f2c34b6675`, tag `account-deletion-public-ui-20260822`.
+- Replayed current-develop contract: `f36c6fd1d37b123f388a0d89ffaed1990be22ec8`, tag `account-deletion-encrypted-export-contract-current-develop-20260822`.
+- Exact current-develop export/UI candidate: `98dcb1baacc6b72402fdd855c8957e775cb1d7f2`, tag `account-deletion-export-ui-candidate-20260822`; parent base `origin/develop@a40cc65d3f`.
 - Audited issue #23098, merged fail-closed PR #22854 / `c276ccf007dd8f1e6102b8d5799b5ec6109394ef`, UI-only draft PRs #24253/#24256, applicable repository/package guides, schema ownership, and current migration tail.
 - Claimed the Cloud/Security implementation lane on issue #23098: https://github.com/elizaOS/eliza/issues/23098#issuecomment-5378961151.
 - Classified all 215 direct user/organization foreign-key edges with a fail-closed digest-pinned runtime policy: 69 external reconciliation, 10 shared transfer, remaining cascade/anonymize; unknown restrictive edges fail tests. Digest: `15534d017ba7c2a8414b4831ded62b8fe6256daca279115c56c48eacf62e0e3a`.
@@ -26,7 +28,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Android/shared contract handoff
 
-- Stable source: `496d77baefc5ef57cfe6a900be572c374883382b` (`account-deletion-encrypted-export-contract-20260822`).
+- Current-develop contract source: `f36c6fd1d37b123f388a0d89ffaed1990be22ec8` (`account-deletion-encrypted-export-contract-current-develop-20260822`). The original pre-replay handoff remains preserved at `496d77baefc5ef57cfe6a900be572c374883382b`.
 - Typed contract: `packages/cloud/shared/src/types/account-lifecycle.ts` exports `AccountDeletionAcceptedDto`, `AccountDeletionStatusDto`, status/export enums, next actions, conflict codes, and the four operation contracts.
 - `POST /api/v1/me/account-deletion`: recent authenticated session, same-origin mutation, exact JSON `{ "confirmation": "DELETE" }`; returns `202 AccountDeletionAcceptedDto` only for the initial accepted reservation.
 - `POST /api/public/account-deletion`: external recently authenticated request path with the same exact confirmation and accepted DTO.
@@ -37,12 +39,12 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Doing
 
-- The bounded encrypted export/download, recovery capability, generic public page, and browser client are locally checkpointed. Preserve this exact candidate for isolated staging serialization.
+- The bounded encrypted export/download, recovery capability, generic public page, and browser client are locally checkpointed. Preserve exact candidate `98dcb1baacc6b72402fdd855c8957e775cb1d7f2` for isolated staging serialization.
 - Keep the broader irreversible provider/terminal-erasure saga fail-closed; it is not part of the completed export/UI checkpoint and must not be represented as complete.
 
 ## Next
 
-1. Coordinate exact source `c71a5932c886141c618d3c2b1daea5f2c34b6675` with the shared staging owner before any non-production deployment.
+1. Coordinate exact source `98dcb1baacc6b72402fdd855c8957e775cb1d7f2` with the shared staging owner before any non-production deployment.
 2. Continue the separately gated provider saga and terminal erasure work only within #23098 authority; do not weaken the legacy fail-closed fence.
 3. Exercise disposable staging fixtures and final-absence proof only after source serialization.
 4. Produce rollout/rollback/runbook, focused draft PR metadata, and the Cloud/Security/SRE/Steward/billing/provider reviewer matrix.
@@ -55,15 +57,15 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Tests and evidence
 
-- Focused account-deletion backend: 39/39 pass: export 7, lifecycle service 11, real PGlite reservation/concurrency/export fencing 6, full-schema FK policy 3, public status/request/undo route 6, authenticated route 3, export route 3.
+- Exact-head focused backend/migration proof: 47/47 pass: export 7, lifecycle service 11, real PGlite reservation/concurrency/export fencing 6, full-schema FK policy 3, migration application 3, migration journal 5, public status/request/undo route 6, authenticated route 3, export route 3.
 - Generic UI/client: 16/16 pass under Vitest, including capability persistence, no query-parameter authority, exact undo/export confirmations, and client-side SHA-256 mismatch rejection.
 - Focused Biome check across all changed backend/UI files: pass.
 - Cloud shared typecheck: pass.
-- API-wide typecheck has one unchanged baseline failure at `packages/cloud/api/v1/voice/session/__tests__/ws-lifecycle.test.ts:1089` (`string | undefined` passed where `string` is required); deletion/export diagnostics are clean.
+- Cloud API typecheck and production Worker dry-run bundle: pass after replaying onto `origin/develop@a40cc65d3f`.
 - UI-wide typecheck has one unchanged environment baseline failure at `packages/ui/src/bridge/storage-bridge.ts:53`: missing `@elizaos/capacitor-secure-store` type/module; focused UI tests are clean.
 - Direct Bun execution is not a valid runner for the two Vitest UI files because Bun lacks `vi.hoisted`; the correct Vitest run passes 16/16.
 - The repository's coverage-enabled Bun PGlite run passes assertions but its coverage writer can fail with Bun `WriteFailed`; the identical suite passes 6/6 with an explicit disposable no-coverage Bun config.
-- The broad app-view audit was stopped after 47 green captures/tests to prioritize the atomic backend handoff. The correct focused Cloud audit then passed the actual `/account-deletion` route at desktop and mobile: 2/2, no console errors, banned blue, hover violations, or screenshot-quality issues. Both captures were manually inspected and found readable with no visible overflow/layout break.
+- The broad app-view audit was stopped after 47 green captures/tests to prioritize the atomic backend handoff. The correct focused Cloud audit was rerun at exact candidate head and passed `/account-deletion` at desktop and mobile: 2/2, no console errors, banned blue, hover violations, or screenshot-quality issues. Both exact-head captures were manually inspected and found readable with no visible overflow/layout break.
 - Earlier Drizzle generation was blocked before generation by existing `ERR_PACKAGE_PATH_NOT_EXPORTED` for `packages/core/node_modules/@elizaos/prompts/package.json`; migrations were reviewed append-only and independently applied in isolated PGlite.
 - Staging mutations, provider calls, production mutations, real-user/account deletion, push, merge, deploy, and PR/Play state changes: none.
 
