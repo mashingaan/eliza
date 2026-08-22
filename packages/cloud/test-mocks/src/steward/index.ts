@@ -26,9 +26,24 @@ export async function startStewardMock(
     await next();
   });
 
-  app.patch("/platform/users/:id/deactivate", (c) => {
+  app.get("/platform/users/:id", (c) => {
     const userId = c.req.param("id");
-    users.set(userId, "deactivated");
+    const state = users.get(userId);
+    if (!state || state === "deleted")
+      return c.json({ ok: false, error: "Not found" }, 404);
+    return c.json({
+      ok: true,
+      data: {
+        deactivatedAt:
+          state === "deactivated" ? new Date(0).toISOString() : null,
+      },
+    });
+  });
+
+  app.patch("/platform/users/:id/deactivate", async (c) => {
+    const userId = c.req.param("id");
+    const body = await c.req.json<{ deactivated?: boolean }>();
+    users.set(userId, body.deactivated === false ? "active" : "deactivated");
     return c.json({ ok: true, data: { userId } });
   });
 
