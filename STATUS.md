@@ -11,6 +11,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Generic public UI checkpoint: `c71a5932c886141c618d3c2b1daea5f2c34b6675`, tag `account-deletion-public-ui-20260822`.
 - Replayed current-develop contract: `f36c6fd1d37b123f388a0d89ffaed1990be22ec8`, tag `account-deletion-encrypted-export-contract-current-develop-20260822`.
 - Exact current-develop export/UI candidate: `98dcb1baacc6b72402fdd855c8957e775cb1d7f2`, tag `account-deletion-export-ui-candidate-20260822`; parent base `origin/develop@a40cc65d3f`.
+- Durable saga/cancellation checkpoint: `00e8008de9a308eb6da58614a14c770bb8250f9f` (tagged by the following ledger checkpoint as `account-deletion-fenced-saga-20260822`).
 - Audited issue #23098, merged fail-closed PR #22854 / `c276ccf007dd8f1e6102b8d5799b5ec6109394ef`, UI-only draft PRs #24253/#24256, applicable repository/package guides, schema ownership, and current migration tail.
 - Claimed the Cloud/Security implementation lane on issue #23098: https://github.com/elizaOS/eliza/issues/23098#issuecomment-5378961151.
 - Classified all 215 direct user/organization foreign-key edges with a fail-closed digest-pinned runtime policy: 69 external reconciliation, 10 shared transfer, remaining cascade/anonymize; unknown restrictive edges fail tests. Digest: `15534d017ba7c2a8414b4831ded62b8fe6256daca279115c56c48eacf62e0e3a`.
@@ -25,6 +26,9 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Cancellation and expiry schedule an `export_revoke` receipt after a 15-minute safety delay that outlives the five-minute export lease. R2 delete success with a lost response is reconciled by confirmed absence without repeating delete; completion atomically nulls content/size and records only the deletion receipt digest.
 - Added final-boundary auto-top-up lifecycle/revision checks before authorization and immediately before Stripe.
 - Preserved the legacy due-worker `LIFECYCLE_RESERVATION_REQUIRED` fence; irreversible personal erasure is not enabled prematurely.
+- Added ordered generation-fenced provider phases, durable before-call markers, immutable idempotency keys, retry classes, leases, canonical-state reconciliation, and transactional terminal erasure with identifier nulling. A lost provider response is inspected before any later mutation; an inspection outage remains reconciling.
+- Added a distinct nonterminal `canceling` state. Cancellation keeps organization/user/auth/paid-work fences active and leaves existing sessions and API keys revoked. Only completed `steward_reactivation` and `export_revoke` receipts permit a locked lifecycle-revision increment and terminal `canceled` publication.
+- Proved that concurrent expiry workers publish irreversible authority once, cancellation cancels an in-flight phase generation, and its stale provider callback cannot restore or overwrite cancellation authority.
 
 ## Android/shared contract handoff
 
@@ -36,16 +40,17 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - `DELETE /api/public/account-deletion`: recovery undo via separate `X-Account-Deletion-Recovery` and exact JSON `{ "confirmation": "CANCEL DELETION" }`.
 - `POST /api/public/account-deletion/export`: recovery export via `X-Account-Deletion-Recovery` and exact JSON `{ "confirmation": "EXPORT MY DATA" }`; returns verified JSON bytes plus `X-Account-Deletion-Export-SHA256` and attachment disposition.
 - Clients must retain the two opaque capabilities separately before ordinary logout, never place them in a URL/log/telemetry payload, never infer success from redirects/query parameters, and verify the download SHA-256 before presenting success.
+- Stable cancellation DTO rule from `00e8008de9`: `status: "canceling"`, `accessState: "fenced"`, `canCancel: false`, and `nextAction: "wait_for_reconciliation"` are nonterminal. Only `status: "canceled"`, `accessState: "active"`, and `nextAction: "none"` are terminal. Android/web must not infer terminal cancellation from the HTTP mutation response alone; poll the opaque status capability.
 
 ## Doing
 
-- The bounded encrypted export/download, recovery capability, generic public page, and browser client are locally checkpointed. Preserve exact candidate `98dcb1baacc6b72402fdd855c8957e775cb1d7f2` for isolated staging serialization.
-- Keep the broader irreversible provider/terminal-erasure saga fail-closed; it is not part of the completed export/UI checkpoint and must not be represented as complete.
+- The bounded encrypted export/download, recovery capability, generic public page, durable saga authority, and cancellation contract are locally checkpointed. Preserve exact saga checkpoint `00e8008de9a308eb6da58614a14c770bb8250f9f` for continued isolated work.
+- Default adapters now cover Steward, Stripe, domains, backup catalogue objects, compute/containers, GitHub/apps, connector OAuth, voice credentials, primary object storage, Vault bindings, and discovered grants. Remote spool authority, environment wiring for both backup stores, full-schema erasure proof, and disposable staging absence evidence remain open and fail closed.
 
 ## Next
 
-1. Coordinate exact source `98dcb1baacc6b72402fdd855c8957e775cb1d7f2` with the shared staging owner before any non-production deployment.
-2. Continue the separately gated provider saga and terminal erasure work only within #23098 authority; do not weaken the legacy fail-closed fence.
+1. Coordinate exact source `00e8008de9a308eb6da58614a14c770bb8250f9f` with Android for the typed `canceling`/`accessState` parser update; no Android files were edited here.
+2. Continue focused provider adapter, lifecycle-boundary, full-schema terminal erasure, and restart reconciliation proof only within #23098 authority; do not weaken the legacy fail-closed fence.
 3. Exercise disposable staging fixtures and final-absence proof only after source serialization.
 4. Produce rollout/rollback/runbook, focused draft PR metadata, and the Cloud/Security/SRE/Steward/billing/provider reviewer matrix.
 
@@ -58,6 +63,8 @@ Updated: 2026-08-22 (America/Los_Angeles)
 ## Tests and evidence
 
 - Exact-head focused backend/migration proof: 47/47 pass: export 7, lifecycle service 11, real PGlite reservation/concurrency/export fencing 6, full-schema FK policy 3, migration application 3, migration journal 5, public status/request/undo route 6, authenticated route 3, export route 3.
+- Saga/cancellation checkpoint proof: 32/32 pass across public route 6, provider saga lost-response/stale-generation 3, lifecycle service 11, migration application 4, and real PGlite reservation/cancellation/expiry concurrency 8; 134 assertions. Cloud shared typecheck and Cloud API typecheck/production Worker dry-run pass.
+- Correct Vitest UI client command passes 5/5. Direct Bun execution of that Vitest file fails before tests because Bun's compatibility layer lacks `vi.hoisted`; this is a runner mismatch, not a product failure.
 - Generic UI/client: 16/16 pass under Vitest, including capability persistence, no query-parameter authority, exact undo/export confirmations, and client-side SHA-256 mismatch rejection.
 - Focused Biome check across all changed backend/UI files: pass.
 - Cloud shared typecheck: pass.
@@ -71,7 +78,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 ## Remaining gates
 
-- The atomic backend export contract is committed, but complete external provider adapters, final anonymization/erasure, and isolated-staging final-absence proof remain open under issue #23098.
+- The saga authority and default adapter candidate are committed, but backup-store environment wiring, remote spool proof, comprehensive provider-specific failure tests, full-schema terminal erasure, and isolated-staging final-absence proof remain open under issue #23098.
 - Full authenticated recovery/export interaction recording still requires a disposable staged account; the anonymous external route has focused desktop/mobile visual proof.
 - Disposable staging source/deploy serialization with the shared staging owner and canonical non-production fixtures.
 - Independent Cloud, Security, SRE, Steward, billing, and provider-owner review.
