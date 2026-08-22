@@ -17,6 +17,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Provisioning dispatch lifecycle fence: `a73f71110420b847549226ea636a36db1bb4f050`.
 - Atomic terminal-erasure transaction proof: `dbd69ee075598a97ad4514b62943373a05b27274`.
 - Bounded local completion-audit cleanup: `8b4009f72bda8dff2f9fccd77f23a006135a9f73`; tag `account-deletion-local-completion-audit-20260822` points at the following ledger checkpoint.
+- Disposable S3-compatible object-purge proof uses the repository's hard-gated loopback suite and local MinIO image `sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e`; tag `account-deletion-local-s3-proof-20260822` points at this evidence ledger checkpoint.
 - Audited issue #23098, merged fail-closed PR #22854 / `c276ccf007dd8f1e6102b8d5799b5ec6109394ef`, UI-only draft PRs #24253/#24256, applicable repository/package guides, schema ownership, and current migration tail.
 - Claimed the Cloud/Security implementation lane on issue #23098: https://github.com/elizaOS/eliza/issues/23098#issuecomment-5378961151.
 - Classified all 215 direct user/organization foreign-key edges with a fail-closed digest-pinned runtime policy: 69 external reconciliation, 10 shared transfer, remaining cascade/anonymize; unknown restrictive edges fail tests. Digest: `15534d017ba7c2a8414b4831ded62b8fe6256daca279115c56c48eacf62e0e3a`.
@@ -73,6 +74,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 
 - Bounded exact-head audit: shared contract/migration/repository/saga/export/resource suites 47/47 with 197 assertions; renewal/provisioning boundary suites 69/69 with 324 assertions; cancellation/authority/auto-top-up regression suites 80/80 with 276 assertions; API routes 12/12 with 32 assertions; isolated database integrations 4/4 with 18 assertions; staging-canary guard contracts 12/12 with 75 assertions; UI deletion client/panels 16/16.
 - Terminal erasure repository suite now passes 10/10 with 77 assertions, including completed identifier-free receipt retention and restrictive-FK rollback.
+- Disposable object-store integration passes 1/1 with 5 assertions against MinIO bound only to `127.0.0.1:59000`: exact organization path-segment and metadata ownership were erased while another tenant and substring-only keys remained. The one-off container and its ephemeral data were removed after the run.
 - Exact-head focused backend/migration proof: 47/47 pass: export 7, lifecycle service 11, real PGlite reservation/concurrency/export fencing 6, full-schema FK policy 3, migration application 3, migration journal 5, public status/request/undo route 6, authenticated route 3, export route 3.
 - Saga/cancellation checkpoint proof: 32/32 pass across public route 6, provider saga lost-response/stale-generation 3, lifecycle service 11, migration application 4, and real PGlite reservation/cancellation/expiry concurrency 8; 134 assertions. Cloud shared typecheck and Cloud API typecheck/production Worker dry-run pass.
 - Restart-safe cancellation proof: lifecycle/PGlite focused suites 21/21 pass with 103 assertions; Cloud shared, Cloud test-mocks, and Cloud API typechecks pass, including the Worker dry-run bundle.
@@ -96,7 +98,7 @@ Updated: 2026-08-22 (America/Los_Angeles)
 ## Remaining gates
 
 - The saga authority and default adapter candidate are committed, but `secondary_backups` requires an injected `AgentBackupObjectStoreRegistry`; without it the adapter returns `BACKUP_STORAGE_AUTHORITY_UNAVAILABLE`. The `spools` phase deliberately refuses mutation while backup/spool rows remain because no canonical remote spool authority is wired. These are exact fail-closed provider-owner gates.
-- The disposable S3 suite requires the explicit local-only target `http://127.0.0.1:59000` plus `ELIZA_ACCOUNT_DELETION_REAL_S3_TEST=1`; it was not run because no disposable S3 service was provisioned during this bounded audit. No hosted provider erasure or absence claim is made.
+- The disposable S3-compatible suite is locally proven, but no hosted R2 or secondary-backup provider erasure or absence claim is made.
 - The local terminal transaction and full-schema FK classification are green, but complete disposable hosted final absence across PostgreSQL, both object stores/backups, spools, Steward, billing, compute, GitHub, connectors, voice, domains, Vault/keys, and grants remains required.
 - Full authenticated recovery/export interaction recording still requires a disposable staged account; the anonymous external route has focused desktop/mobile visual proof.
 - Disposable staging source/deploy serialization with the shared staging owner and canonical non-production fixtures.
