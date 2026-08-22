@@ -2003,6 +2003,13 @@
       "when": 1793995200004,
       "tag": "0302_account_deletion_exports",
       "breakpoints": true
+    },
+    {
+      "idx": 286,
+      "version": "7",
+      "when": 1793995200005,
+      "tag": "0303_account_deletion_canceling_state",
+      "breakpoints": true
     }
   ]
 }
