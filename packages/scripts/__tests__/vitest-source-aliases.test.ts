@@ -133,6 +133,7 @@ describe("workspace source aliases", () => {
             "eliza-source": "../outside.ts",
             import: "./dist/escape.js",
           },
+          "./blocked": null,
         },
       }),
     );
@@ -146,6 +147,9 @@ describe("workspace source aliases", () => {
     ).toBe(path.join(packageDir, "src", "internal", "string-endpoint.ts"));
     expect(resolveAlias(aliases, "@elizaos/plugin.fixture/escape")).toBe(
       path.join(packageDir, "src", "escape"),
+    );
+    expect(resolveAlias(aliases, "@elizaos/plugin.fixture/blocked")).toBe(
+      path.join(packageDir, "src", "blocked"),
     );
   });
 });
