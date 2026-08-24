@@ -16,7 +16,11 @@ import { apiKeys } from "../../db/schemas/api-keys";
 import { organizationBalanceRevisionSequence, organizations } from "../../db/schemas/organizations";
 import { userSessions } from "../../db/schemas/user-sessions";
 import { users } from "../../db/schemas/users";
-import { getAccountDeletionStatusByCredential, requestAccountDeletion } from "./account-deletion";
+import {
+  activateAccountDeletion,
+  getAccountDeletionStatusByCredential,
+  requestAccountDeletion,
+} from "./account-deletion";
 
 const PERSONAL_ORGANIZATION_ID = "11111111-1111-4111-8111-111111111111";
 const PERSONAL_USER_ID = "22222222-2222-4222-8222-222222222222";
@@ -58,7 +62,7 @@ afterAll(async () => {
 });
 
 describe("account deletion reservation lifecycle", () => {
-  test("fences a personal account and keeps status available after session revocation", async () => {
+  test("reserves before fencing, then keeps status available after activation revokes sessions", async () => {
     expect(databaseReady).toBe(true);
     await dbWrite.insert(organizations).values({
       id: PERSONAL_ORGANIZATION_ID,
@@ -93,31 +97,68 @@ describe("account deletion reservation lifecycle", () => {
       now: new Date("2026-08-22T12:00:00Z"),
     });
     expect(accepted.request).toMatchObject({
-      status: "reserved",
-      canCancel: true,
+      status: "pending_activation",
+      accessState: "active",
+      canCancel: false,
+      nextAction: "confirm_recovery_package",
     });
 
-    const [user] = await dbWrite.select().from(users).where(eq(users.id, PERSONAL_USER_ID));
-    const [organization] = await dbWrite
+    const [reservedUser] = await dbWrite.select().from(users).where(eq(users.id, PERSONAL_USER_ID));
+    const [reservedOrganization] = await dbWrite
       .select()
       .from(organizations)
       .where(eq(organizations.id, PERSONAL_ORGANIZATION_ID));
-    const [key] = await dbWrite.select().from(apiKeys).where(eq(apiKeys.user_id, PERSONAL_USER_ID));
-    const [session] = await dbWrite
+    const [reservedKey] = await dbWrite
+      .select()
+      .from(apiKeys)
+      .where(eq(apiKeys.user_id, PERSONAL_USER_ID));
+    const [reservedSession] = await dbWrite
       .select()
       .from(userSessions)
       .where(eq(userSessions.user_id, PERSONAL_USER_ID));
-    expect(user).toMatchObject({
+    expect(reservedUser).toMatchObject({
+      is_active: true,
+      account_lifecycle_state: "active",
+    });
+    expect(reservedOrganization).toMatchObject({
+      is_active: true,
+      auto_top_up_enabled: true,
+      account_lifecycle_state: "active",
+    });
+    expect(reservedKey?.is_active).toBe(true);
+    expect(reservedSession?.ended_at).toBeNull();
+
+    await expect(
+      activateAccountDeletion(accepted.recoveryCredential, new Date("2026-08-22T12:00:00Z")),
+    ).resolves.toMatchObject({ status: "reserved", accessState: "fenced" });
+
+    const [activatedUser] = await dbWrite
+      .select()
+      .from(users)
+      .where(eq(users.id, PERSONAL_USER_ID));
+    const [activatedOrganization] = await dbWrite
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, PERSONAL_ORGANIZATION_ID));
+    const [activatedKey] = await dbWrite
+      .select()
+      .from(apiKeys)
+      .where(eq(apiKeys.user_id, PERSONAL_USER_ID));
+    const [activatedSession] = await dbWrite
+      .select()
+      .from(userSessions)
+      .where(eq(userSessions.user_id, PERSONAL_USER_ID));
+    expect(activatedUser).toMatchObject({
       is_active: false,
       account_lifecycle_state: "deletion_recovery",
     });
-    expect(organization).toMatchObject({
+    expect(activatedOrganization).toMatchObject({
       is_active: false,
       auto_top_up_enabled: false,
       account_lifecycle_state: "deletion_recovery",
     });
-    expect(key?.is_active).toBe(false);
-    expect(session?.ended_at).not.toBeNull();
+    expect(activatedKey?.is_active).toBe(false);
+    expect(activatedSession?.ended_at).not.toBeNull();
 
     const status = await getAccountDeletionStatusByCredential(accepted.statusCredential);
     expect(status).toMatchObject({

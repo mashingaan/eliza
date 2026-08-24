@@ -28,18 +28,16 @@ export function AccountDeletionDialog({
   const [open, setOpen] = useState(false);
   const [confirmation, setConfirmation] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [serverAccepted, setServerAccepted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
     setSubmitting(true);
     setError(null);
+    let accepted: Awaited<ReturnType<typeof submitAccountDeletion>>;
     try {
-      const accepted = await submitAccountDeletion();
-      await endLocalSessionAfterDeletion();
-      onAccepted?.(accepted.request);
-      if (!onAccepted && typeof window !== "undefined") {
-        window.location.assign("/account-deletion");
-      }
+      accepted = await submitAccountDeletion();
+      setServerAccepted(true);
     } catch (cause) {
       // error-policy:J4 request failure remains visibly distinct and leaves
       // the confirmation dialog open for a safe retry.
@@ -49,6 +47,21 @@ export function AccountDeletionDialog({
           : "Deletion could not be scheduled",
       );
       setSubmitting(false);
+      return;
+    }
+
+    try {
+      await endLocalSessionAfterDeletion();
+    } catch {
+      // error-policy:J4 the server outcome is already committed. Keep the
+      // destructive action disabled and expose the explicit cleanup route.
+      setError(
+        "Deletion is scheduled, but local sign-out is incomplete on this device.",
+      );
+    }
+    onAccepted?.(accepted.request);
+    if (!onAccepted && typeof window !== "undefined") {
+      window.location.assign("/account-deletion");
     }
   };
 
@@ -94,7 +107,12 @@ export function AccountDeletionDialog({
           </label>
           {error ? (
             <p className="text-sm text-danger" role="alert">
-              {error}
+              {error}{" "}
+              {serverAccepted ? (
+                <a className="underline" href="/account-deletion">
+                  Continue to deletion status
+                </a>
+              ) : null}
             </p>
           ) : null}
           <AlertDialogFooter>
@@ -107,7 +125,11 @@ export function AccountDeletionDialog({
               onClick={() => void submit()}
               data-testid="delete-account-confirm"
             >
-              {submitting ? "Scheduling…" : "Delete account"}
+              {serverAccepted
+                ? "Deletion scheduled"
+                : submitting
+                  ? "Scheduling…"
+                  : "Delete account"}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>

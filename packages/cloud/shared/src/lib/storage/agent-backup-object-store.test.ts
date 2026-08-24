@@ -272,7 +272,7 @@ describe("agent backup explicit object storage", () => {
     await expect(r2.head(r2Key)).resolves.toMatchObject({ status: "present" });
     await expect(hetzner.head(hetznerKey)).resolves.toMatchObject({ status: "present" });
     await expect(r2.listKeys({ prefix: "agent-sandbox-backups/org-b/" })).resolves.toEqual({
-      keys: [r2Key, hetznerKey],
+      keys: [hetznerKey, r2Key],
       truncated: false,
     });
   });

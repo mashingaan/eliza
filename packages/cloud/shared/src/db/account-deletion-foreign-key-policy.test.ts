@@ -2,6 +2,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
+import { ElizaError } from "@elizaos/core";
 import {
   ACCOUNT_DELETION_FOREIGN_KEY_SNAPSHOT_SHA256,
   type AccountDeletionForeignKeyDescriptor,
@@ -26,7 +27,7 @@ describe("account deletion full-schema foreign-key policy", () => {
       .update(descriptors.map(serializeDescriptor).join("\n"))
       .digest("hex");
 
-    expect(descriptors).toHaveLength(215);
+    expect(descriptors).toHaveLength(222);
     expect(digest).toBe(ACCOUNT_DELETION_FOREIGN_KEY_SNAPSHOT_SHA256);
   });
 
@@ -36,10 +37,10 @@ describe("account deletion full-schema foreign-key policy", () => {
       action: classifyAccountDeletionForeignKey(descriptor),
     }));
 
-    expect(classified).toHaveLength(215);
+    expect(classified).toHaveLength(222);
     expect(classified.every(({ action }) => Boolean(action))).toBe(true);
     expect(classified.filter(({ action }) => action === "reconcile_external_resource").length).toBe(
-      69,
+      70,
     );
     expect(classified.filter(({ action }) => action === "transfer_shared_resource").length).toBe(
       10,
@@ -47,14 +48,22 @@ describe("account deletion full-schema foreign-key policy", () => {
   });
 
   test("rejects an unknown restrictive relationship", () => {
-    expect(() =>
+    let failure: unknown;
+    try {
       classifyAccountDeletionForeignKey({
         sourceTable: "new_provider_grants",
         sourceColumns: "organization_id",
         targetTable: "organizations",
         targetColumns: "id",
         onDelete: "restrict",
-      }),
-    ).toThrow("Unclassified account-deletion foreign key");
+      });
+    } catch (cause) {
+      failure = cause;
+    }
+    expect(failure).toBeInstanceOf(ElizaError);
+    expect(failure).toMatchObject({
+      code: "ACCOUNT_DELETION_FOREIGN_KEY_UNCLASSIFIED",
+      severity: "fatal",
+    });
   });
 });
