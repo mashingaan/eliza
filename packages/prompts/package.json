@@ -10,12 +10,6 @@
     ".": {
       "types": "./src/index.ts",
       "import": "./src/index.ts"
-    },
-    "./*.css": "./dist/*.css",
-    "./*": {
-      "types": "./dist/*.d.ts",
-      "import": "./dist/*.js",
-      "default": "./dist/*.js"
     }
   },
   "scripts": {
@@ -27,12 +21,11 @@
     "lint": "bunx @biomejs/biome check --write .",
     "lint:check": "bunx @biomejs/biome check .",
     "format:check": "bunx @biomejs/biome format .",
-    "typecheck": "echo 'No TypeScript source files to check'",
+    "typecheck": "tsc --noEmit --ignoreConfig --allowImportingTsExtensions --module preserve --moduleResolution bundler --target ES2022 src/index.ts src/prompt-compression.ts",
     "test": "bun test ./test"
   },
   "files": [
     "src/",
-    "dist/",
     "scripts/"
   ],
   "keywords": [

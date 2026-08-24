@@ -17,7 +17,9 @@ root [`CLAUDE.md`](../../CLAUDE.md).
   backward compatibility. Runtime and codegen paths use complete authored
   descriptions directly; the alias must never rewrite text.
 - Also owns the action/provider **specs** under `specs/` and the generators in `scripts/` that build a merged plugin action spec and emit `packages/core/src/generated/action-docs.ts`.
-- This package ships no compiled JS for `src/` — `main`/`exports['.']` point at `src/index.ts` directly (consumed by TS tooling / bundlers in the monorepo). The `dist/` subpath mappings in `exports` (`./*.css` and `./*`) exist for potential subpath consumers; no codegen script in this package writes to `dist/`.
+- This package ships its maintained TypeScript source directly. `main`,
+  `types`, and `exports['.']` all point at `src/index.ts`; there are no compiled
+  files or supported package subpath exports.
 
 ## Layout
 
@@ -54,13 +56,16 @@ bun run --cwd packages/prompts build:plugin-action-spec # only regen specs/actio
 bun run --cwd packages/prompts build:action-docs        # only regen packages/core/src/generated/action-docs.ts
 bun run --cwd packages/prompts check:secrets            # scan prompt files for secrets/PII
 bun run --cwd packages/prompts test                     # bun test ./test
+bun run --cwd packages/prompts typecheck                # typecheck both maintained TypeScript modules
 bun run --cwd packages/prompts lint                     # biome check --write
 bun run --cwd packages/prompts lint:check               # biome check (no write)
 bun run --cwd packages/prompts format:check             # biome format check
 bun run --cwd packages/prompts clean                    # rm -rf dist
 ```
 
-`typecheck` only prints its status because this package has no standalone TypeScript program beyond the prompt string module.
+`typecheck` invokes TypeScript directly over `src/index.ts` and
+`src/prompt-compression.ts`; the package intentionally has no standalone
+`tsconfig.json`.
 
 ## Config / env vars
 
