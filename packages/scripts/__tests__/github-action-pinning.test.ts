@@ -37,6 +37,8 @@ const smokeLanesCoreBuildCondition =
   "needs.changes.outputs.cloud == 'true' || needs.changes.outputs.zero_key == 'true'";
 const liveSmokeCloudCondition =
   "inputs.suite == 'all' || inputs.suite == 'cloud'";
+const liveSmokeCoreCondition =
+  "inputs.suite == 'all' || inputs.suite == 'scenarios' || inputs.suite == 'live-information' || inputs.suite == 'cloud'";
 
 function assertJobBrowserBootstrap(
   steps: WorkflowStep[],
@@ -132,7 +134,7 @@ function assertLiveSmokeCloudCoreBootstrap(source: string): void {
     );
   }
   if (
-    steps[buildIndex]?.if !== liveSmokeCloudCondition ||
+    steps[buildIndex]?.if !== liveSmokeCoreCondition ||
     steps[e2eIndex]?.if !== liveSmokeCloudCondition
   ) {
     throw new Error(
@@ -390,11 +392,8 @@ describe("GitHub action supply-chain references", () => {
       "Live Smoke must retain workspace setup, core build, and Cloud e2e steps",
     );
 
-    const buildStep = `      # Cloud API e2e loads the compiled Workerd export from
-      # @elizaos/core/edge. The lean install above skips lifecycle scripts, so
-      # this artifact must be built explicitly on a clean runner.
-      - name: Build core runtime contract
-        if: ${liveSmokeCloudCondition}
+    const buildStep = `      - name: Build core runtime contract
+        if: ${liveSmokeCoreCondition}
         run: bun run build:core
 
 `;
@@ -480,9 +479,9 @@ describe("GitHub action supply-chain references", () => {
   });
 
   test("routes homepage deploys through the consolidated Cloudflare workflow", () => {
-    // The entry workflow owns the homepage trigger paths and the unprivileged
-    // preview build; the Pages project it deploys into is bound in the reusable
-    // release workflow it calls.
+    // Develop Full calls Quality for homepage-source validation and the
+    // consolidated build. The deployment workflow consumes that same app
+    // artifact contract when the reconciler dispatches an exact SHA.
     const source = readFileSync(
       join(githubRoot, "workflows", "cloud-cf-deploy.yml"),
       "utf8",
@@ -491,7 +490,12 @@ describe("GitHub action supply-chain references", () => {
       join(githubRoot, "workflows", "cloud-cf-release.yml"),
       "utf8",
     );
-    expect(source).toContain('      - "packages/homepage/**"');
+    const qualitySource = readFileSync(
+      join(githubRoot, "workflows", "quality.yml"),
+      "utf8",
+    );
+    expect(qualitySource).toContain("packages/homepage/");
+    expect(qualitySource).toContain("Build the only deployable frontend");
     expect(source).toContain("Build consolidated frontend artifact");
     expect(releaseSource).toContain("Build consolidated frontend artifact");
     expect(releaseSource).toContain("PAGES_PROJECT: eliza-app");

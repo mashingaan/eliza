@@ -1207,6 +1207,9 @@ jobs:
           install-native-deps: "false"
           skip-avatar-clone: "true"
 
+      - name: Build core contract for script tests
+        run: bun run build:core
+
       - name: Run the complete isolated script-test inventory
         run: bun run test:scripts
 

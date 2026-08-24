@@ -6663,7 +6663,14 @@ export class AgentRuntime implements IAgentRuntime {
 				for (const item of candidate) result.push(clone(item));
 				return result;
 			}
-			if (!isPlainObject(candidate)) return candidate;
+			// A hostile Proxy may trap prototype reflection. Keep such an opaque
+			// value intact here; the descriptor-only secret/PII walkers normalize it
+			// later without consulting its prototype.
+			try {
+				if (!isPlainObject(candidate)) return candidate;
+			} catch {
+				return candidate;
+			}
 			const result: Record<string, unknown> = {};
 			seen.set(candidate, result);
 			for (const [key, nested] of Object.entries(candidate)) {
@@ -7056,7 +7063,9 @@ export class AgentRuntime implements IAgentRuntime {
 				}
 				let modelParams: ModelParamsMap[T];
 				const paramsClone = isPlainObject(params)
-					? this.cloneModelRequestGraph(params)
+					? this.isSecretSwapEnabled()
+						? { ...(params as Record<string, unknown>) }
+						: this.cloneModelRequestGraph(params)
 					: params;
 				if (
 					params === null ||
