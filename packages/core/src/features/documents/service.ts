@@ -35,6 +35,7 @@ import {
 	type AccessContext,
 	type Content,
 	type CustomMetadata,
+	type DocumentFragmentQueryParams,
 	type DocumentListCursor,
 	type DocumentListQueryParams,
 	type DocumentListRequesterRole,
@@ -145,6 +146,7 @@ const PRE_DOCUMENTS_TABLE = "knowledge";
 const DOCUMENT_INGESTION_PENDING_TIMEOUT_MS = 5 * 60 * 1_000;
 const CHARACTER_DOCUMENT_EMBEDDING_WAIT_TIMEOUT_MS = 120_000;
 const CHARACTER_DOCUMENT_EMBEDDING_WAIT_INTERVAL_MS = 1_000;
+const DOCUMENT_FRAGMENT_TRAVERSAL_PAGE_SIZE = 1_000;
 const DOCUMENT_SCOPES = new Set<DocumentVisibilityScope>([
 	"global",
 	"owner-private",
@@ -697,21 +699,13 @@ export class DocumentService extends Service {
 			this.runtime,
 			accessContext,
 		);
-		const fragments: Memory[] = [];
-		const pageSize = 1_000;
-		for (let offset = 0; ; offset += pageSize) {
-			const page = await this.runtime.adapter.queryDocumentFragments({
-				agentId: this.runtime.agentId,
-				documentId,
-				requesterEntityId: requester.entityId,
-				requesterRoomIds: requester.roomIds,
-				requesterRole: requester.role,
-				limit: pageSize,
-				offset,
-			});
-			fragments.push(...page);
-			if (page.length < pageSize) return fragments;
-		}
+		return this.queryCompleteDocumentFragments({
+			agentId: this.runtime.agentId,
+			documentId,
+			requesterEntityId: requester.entityId,
+			requesterRoomIds: requester.roomIds,
+			requesterRole: requester.role,
+		});
 	}
 
 	/**
@@ -922,10 +916,7 @@ export class DocumentService extends Service {
 	}
 
 	/** Runs the DOCUMENTS provider's search and inventory reads on one snapshot. */
-	async composeProviderDocuments(
-		message: Memory,
-		listOptions: DocumentListOptions,
-	): Promise<{
+	async composeProviderDocuments(message: Memory): Promise<{
 		relevantFragments: StoredDocument[];
 		documents: Memory[];
 		pinnedDocuments: Memory[];
@@ -934,7 +925,7 @@ export class DocumentService extends Service {
 			this.runtime,
 			message,
 		);
-		const [relevantFragments, listResult, pinnedDocuments] = await Promise.all([
+		const [relevantFragments, documents] = await Promise.all([
 			this.searchDocumentsWithRequester(
 				message,
 				undefined,
@@ -943,21 +934,27 @@ export class DocumentService extends Service {
 				undefined,
 				resolveRequester,
 			),
-			this.listDocumentsDetailedWithRequester(listOptions, resolveRequester),
-			this.listPinnedDocumentsWithRequester(resolveRequester),
+			this.listAllDocumentsWithRequester(resolveRequester),
 		]);
 		return {
 			relevantFragments,
-			documents: listResult.documents,
-			pinnedDocuments,
+			documents,
+			pinnedDocuments: documents.filter((document) => {
+				const metadata = document.metadata as
+					| DocumentMemoryMetadata
+					| undefined;
+				return (
+					metadata?.type === MemoryType.DOCUMENT && metadata.pinned === true
+				);
+			}),
 		};
 	}
 
-	/** Lists every pinned document visible to the provider's requester. */
-	private async listPinnedDocumentsWithRequester(
+	/** Lists every document visible to the provider's requester. */
+	private async listAllDocumentsWithRequester(
 		resolveRequester: DocumentRequesterResolver,
 	): Promise<Memory[]> {
-		const pinnedDocuments: Memory[] = [];
+		const documents: Memory[] = [];
 		let cursor: DocumentListCursor | undefined;
 		const seenCursors = new Set<string>();
 		do {
@@ -968,16 +965,7 @@ export class DocumentService extends Service {
 				},
 				resolveRequester,
 			);
-			pinnedDocuments.push(
-				...page.documents.filter((document) => {
-					const metadata = document.metadata as
-						| DocumentMemoryMetadata
-						| undefined;
-					return (
-						metadata?.type === MemoryType.DOCUMENT && metadata.pinned === true
-					);
-				}),
-			);
+			documents.push(...page.documents);
 			if (!page.hasMore) break;
 			if (!page.nextCursor) {
 				throw new ElizaError(
@@ -1003,7 +991,7 @@ export class DocumentService extends Service {
 			seenCursors.add(serializedCursor);
 			cursor = page.nextCursor;
 		} while (cursor);
-		return pinnedDocuments;
+		return documents;
 	}
 
 	async deleteDocument(documentId: UUID, message?: Memory): Promise<void> {
@@ -1918,6 +1906,98 @@ export class DocumentService extends Service {
 		return filterByAccessContext(results, accessContext, this.runtime.agentId);
 	}
 
+	private async scanDocumentFragments(
+		params: Omit<DocumentFragmentQueryParams, "limit" | "offset">,
+	): Promise<Memory[]> {
+		const fragments: Memory[] = [];
+		let offset = 0;
+		let previousPage: readonly Memory[] = [];
+
+		for (;;) {
+			const page = await this.runtime.adapter.queryDocumentFragments({
+				...params,
+				limit: DOCUMENT_FRAGMENT_TRAVERSAL_PAGE_SIZE,
+				offset,
+			});
+			if (page.length > DOCUMENT_FRAGMENT_TRAVERSAL_PAGE_SIZE) {
+				throw new ElizaError(
+					"Document fragment source returned an invalid page",
+					{
+						code: "DOCUMENT_SEARCH_INVALID_PAGE",
+						context: {
+							offset,
+							requested: DOCUMENT_FRAGMENT_TRAVERSAL_PAGE_SIZE,
+							received: page.length,
+						},
+						severity: "fatal",
+					},
+				);
+			}
+			if (
+				offset > 0 &&
+				page.length > 0 &&
+				JSON.stringify(page) === JSON.stringify(previousPage)
+			) {
+				throw new ElizaError("Document fragment traversal did not advance", {
+					code: "DOCUMENT_SEARCH_PAGINATION_STALLED",
+					context: { offset },
+				});
+			}
+
+			fragments.push(...page);
+			if (page.length < DOCUMENT_FRAGMENT_TRAVERSAL_PAGE_SIZE) {
+				const continuation = await this.runtime.adapter.queryDocumentFragments({
+					...params,
+					limit: 1,
+					offset: offset + page.length,
+				});
+				if (continuation.length > 0) {
+					throw new ElizaError(
+						"Document fragment source returned a capped page",
+						{
+							code: "DOCUMENT_SEARCH_SOURCE_INCOMPLETE",
+							context: {
+								offset,
+								requested: DOCUMENT_FRAGMENT_TRAVERSAL_PAGE_SIZE,
+								returned: page.length,
+							},
+						},
+					);
+				}
+				return fragments;
+			}
+			if (offset > Number.MAX_SAFE_INTEGER - page.length) {
+				throw new ElizaError(
+					"Document fragment result count is not representable",
+					{
+						code: "DOCUMENT_SEARCH_RESULT_TOO_LARGE",
+						context: { offset, pageSize: page.length },
+						severity: "fatal",
+					},
+				);
+			}
+			offset += page.length;
+			previousPage = page;
+		}
+	}
+
+	private async queryCompleteDocumentFragments(
+		params: Omit<DocumentFragmentQueryParams, "limit" | "offset">,
+	): Promise<Memory[]> {
+		const first = await this.scanDocumentFragments(params);
+		const verified = await this.scanDocumentFragments(params);
+		if (JSON.stringify(first) !== JSON.stringify(verified)) {
+			throw new ElizaError(
+				"Document fragment source changed during traversal",
+				{
+					code: "DOCUMENT_SEARCH_SOURCE_UNSTABLE",
+					context: { firstCount: first.length, verifiedCount: verified.length },
+				},
+			);
+		}
+		return verified;
+	}
+
 	/** Pure vector (cosine-similarity) search. */
 	private async _vectorSearch(
 		queryText: string,
@@ -1939,14 +2019,13 @@ export class DocumentService extends Service {
 			return this._keywordSearch(queryText, filterScope, requester);
 		}
 
-		const fragments = await this.runtime.adapter.queryDocumentFragments({
+		const fragments = await this.queryCompleteDocumentFragments({
 			agentId: this.runtime.agentId,
 			requesterEntityId: requester.entityId,
 			requesterRoomIds: requester.roomIds,
 			requesterRole: requester.role,
 			embedding,
 			...filterScope,
-			limit: 20,
 			matchThreshold: 0.1,
 		});
 
@@ -1971,13 +2050,12 @@ export class DocumentService extends Service {
 		filterScope: { roomId?: UUID; worldId?: UUID; entityId?: UUID },
 		requester: DocumentRequester,
 	): Promise<StoredDocument[]> {
-		const allFragments = await this.runtime.adapter.queryDocumentFragments({
+		const allFragments = await this.queryCompleteDocumentFragments({
 			agentId: this.runtime.agentId,
 			requesterEntityId: requester.entityId,
 			requesterRoomIds: requester.roomIds,
 			requesterRole: requester.role,
 			...filterScope,
-			limit: 1_000,
 		});
 		const valid = allFragments.filter(
 			(f) => f.id !== undefined && f.content.text,
@@ -2031,23 +2109,33 @@ export class DocumentService extends Service {
 			return this._keywordSearch(queryText, filterScope, requester);
 		}
 
-		// Fetch a larger PURE-VECTOR candidate set so the explicit BM25 blend below
-		// can re-rank meaningfully. Do NOT pass `query`: that triggers a runtime
-		// BM25 rerank that drops zero-overlap candidates *before* the blend, so the
-		// 0.6·vector + 0.4·bm25 combine never sees the semantic-only matches. And
-		// use `count` (the adapter honours it; `limit` was ignored → pool capped at
-		// the default 10, defeating "fetch a larger candidate set").
-		const candidates = await this.runtime.adapter.queryDocumentFragments({
+		// Traverse both ranked vector matches and the full keyword corpus. Their
+		// union keeps semantic-only rows in the blend while allowing BM25-only rows
+		// to compete; each traversal verifies a stable complete source snapshot.
+		const vectorCandidates = await this.queryCompleteDocumentFragments({
 			agentId: this.runtime.agentId,
 			requesterEntityId: requester.entityId,
 			requesterRoomIds: requester.roomIds,
 			requesterRole: requester.role,
 			embedding,
 			...filterScope,
-			limit: 40,
 			matchThreshold: 0.05,
 		});
-		const valid = candidates.filter(
+		const keywordCandidates = await this.queryCompleteDocumentFragments({
+			agentId: this.runtime.agentId,
+			requesterEntityId: requester.entityId,
+			requesterRoomIds: requester.roomIds,
+			requesterRole: requester.role,
+			...filterScope,
+		});
+		const candidatesById = new Map<string, Memory>();
+		for (const candidate of keywordCandidates) {
+			if (candidate.id) candidatesById.set(candidate.id, candidate);
+		}
+		for (const candidate of vectorCandidates) {
+			if (candidate.id) candidatesById.set(candidate.id, candidate);
+		}
+		const valid = [...candidatesById.values()].filter(
 			(f) => f.id !== undefined && f.content.text,
 		);
 		if (valid.length === 0) return [];
@@ -2553,14 +2641,37 @@ export class DocumentService extends Service {
 				entityId: existingDocument.entityId,
 			},
 		);
-		await this.prepareDocumentFragmentEmbeddings(fragments);
-		const mutation = await this.runtime.adapter.replaceDocumentRevision({
-			...requestContext,
-			documentId: options.documentId,
-			expected: snapshot,
-			replacement,
-			fragments,
-		});
+		try {
+			await this.prepareDocumentFragmentEmbeddings(fragments);
+		} catch (cause) {
+			// error-policy:J2 Preparation remains pre-transactional, but callers
+			// need a document-specific failure while the provider cause is retained.
+			throw new ElizaError("Failed to stage replacement fragments", {
+				code: "DOCUMENT_REVISION_PREPARATION_FAILED",
+				context: { documentId: options.documentId },
+				cause,
+			});
+		}
+		let mutation: Awaited<
+			ReturnType<typeof this.runtime.adapter.replaceDocumentRevision>
+		>;
+		try {
+			mutation = await this.runtime.adapter.replaceDocumentRevision({
+				...requestContext,
+				documentId: options.documentId,
+				expected: snapshot,
+				replacement,
+				fragments,
+			});
+		} catch (cause) {
+			// error-policy:J2 The adapter owns one atomic replacement transaction;
+			// preserve its failure without inventing a partial publication status.
+			throw new ElizaError("Failed to atomically replace document revision", {
+				code: "DOCUMENT_REVISION_PUBLICATION_FAILED",
+				context: { documentId: options.documentId },
+				cause,
+			});
+		}
 		if (mutation.status !== "updated") {
 			throw new ElizaError("Document authorization changed before update", {
 				code:
@@ -2952,7 +3063,11 @@ export class DocumentService extends Service {
 		roomId?: UUID;
 		count?: number;
 		offset?: number;
+		cursor?: { createdAt: number; id: UUID };
 		end?: number;
+		orderBy?: "createdAt";
+		orderDirection?: "asc" | "desc";
+		includeEmbedding?: boolean;
 	}): Promise<Memory[]> {
 		return this.runtime.getMemories({
 			...params,

@@ -110,6 +110,10 @@ import {
   type WebPasskeyCapability,
 } from "./passkey-capability";
 import {
+  hasPasskeyDeviceHint,
+  rememberPasskeyDeviceHint,
+} from "./passkey-device-hints";
+import {
   inferPhoneCountry,
   normalizePhoneForCountry,
   PHONE_COUNTRY_OPTIONS,
@@ -136,6 +140,26 @@ const PLAYWRIGHT_TEST_AUTH_ENABLED =
   import.meta.env.VITE_PLAYWRIGHT_TEST_AUTH === "true" ||
   (typeof process !== "undefined" &&
     process.env?.NEXT_PUBLIC_PLAYWRIGHT_TEST_AUTH === "true");
+/**
+ * Optional local-stack API key for the "Continue with local test account"
+ * shortcut. It is never bundled by default: the operator who arms
+ * `PLAYWRIGHT_TEST_AUTH` on the local Cloud Worker exports the key that the
+ * e2e preload (or their own seed) minted, and `/api/test/auth/session` trades
+ * it for a test session cookie. The button stays hidden when the key is absent.
+ */
+function readLocalDedicatedTestApiKey(): string | null {
+  const fromVite = import.meta.env.VITE_LOCAL_DEDICATED_TEST_API_KEY;
+  if (typeof fromVite === "string" && fromVite.trim()) return fromVite.trim();
+  const fromNext =
+    typeof process !== "undefined"
+      ? process.env?.NEXT_PUBLIC_LOCAL_DEDICATED_TEST_API_KEY
+      : undefined;
+  if (typeof fromNext === "string" && fromNext.trim()) return fromNext.trim();
+  return null;
+}
+const LOCAL_DEDICATED_TEST_API_KEY = readLocalDedicatedTestApiKey();
+const LOCAL_DEDICATED_TEST_SIGN_IN_ENABLED =
+  PLAYWRIGHT_TEST_AUTH_ENABLED && LOCAL_DEDICATED_TEST_API_KEY !== null;
 
 type AuthStep =
   | "idle"
@@ -158,6 +182,29 @@ async function persistStewardToken(token: string): Promise<void> {
     throw new Error(
       "Eliza Cloud sign-in needs browser storage. Enable storage for this site and try again.",
     );
+  }
+}
+
+/**
+ * Parse the `/api/test/auth/session` reply. Malformed bodies become an explicit
+ * empty result so the caller reports the HTTP failure instead of a fake token.
+ */
+function parseLocalTestSessionResponse(raw: string): {
+  error?: string;
+  token?: string;
+} {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return {};
+    const record = parsed as Record<string, unknown>;
+    return {
+      ...(typeof record.error === "string" ? { error: record.error } : {}),
+      ...(typeof record.token === "string" ? { token: record.token } : {}),
+    };
+  } catch {
+    // error-policy:J3 untrusted-input sanitizing — a non-JSON body yields an
+    // explicit empty result; the caller surfaces the HTTP status as the error.
+    return {};
   }
 }
 
@@ -191,6 +238,7 @@ function stripLegacyTokenParamsFromAddressBar(): boolean {
 }
 
 type Provider =
+  | "local"
   | "passkey"
   | "email"
   | "sms"
@@ -536,6 +584,9 @@ export default function StewardLoginSection() {
   const [phone, setPhone] = useState("");
   const [smsCode, setSmsCode] = useState("");
   const [otpCode, setOtpCode] = useState("");
+  const [passkeyEmailGrant, setPasskeyEmailGrant] = useState<string | null>(
+    null,
+  );
   const [emailCode, setEmailCode] = useState("");
   const [emailChallenge, setEmailChallenge] =
     useState<StewardEmailLoginChallenge | null>(null);
@@ -551,6 +602,8 @@ export default function StewardLoginSection() {
   const [loading, setLoading] = useState<Provider | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showPasskeyRecovery, setShowPasskeyRecovery] = useState(false);
+  const [showPasskeyEnrollmentRecovery, setShowPasskeyEnrollmentRecovery] =
+    useState(false);
   const [telegramIntent, setTelegramIntent] = useState(false);
   const telegramIntentButtonRef = useRef<HTMLButtonElement>(null);
   const telegramRegionRef = useRef<HTMLFieldSetElement>(null);
@@ -572,6 +625,12 @@ export default function StewardLoginSection() {
   const walletOptionsRegionRef = useRef<HTMLDivElement>(null);
   const [callbackError, setCallbackError] = useState<string | null>(null);
   const [redirectTo, setRedirectTo] = useState<string | null>(null);
+  // Do not expose fresh-login controls while an older session is still being
+  // restored. Otherwise a delayed restore can overtake an OTP request and make
+  // requesting a code look like successful authentication.
+  const [sessionRecoveryComplete, setSessionRecoveryComplete] = useState(
+    PLAYWRIGHT_TEST_AUTH_ENABLED,
+  );
   const [externalSuccessDestination, setExternalSuccessDestination] = useState<
     string | null
   >(null);
@@ -827,9 +886,12 @@ export default function StewardLoginSection() {
 
   useEffect(() => {
     if (PLAYWRIGHT_TEST_AUTH_ENABLED) return;
-    if (searchParams.get("code")) return;
-    if (searchParams.get("error")) return;
+    if (searchParams.get("code") || searchParams.get("error")) {
+      setSessionRecoveryComplete(true);
+      return;
+    }
 
+    setSessionRecoveryComplete(false);
     let cancelled = false;
 
     const tryRecoverSession = async () => {
@@ -872,6 +934,8 @@ export default function StewardLoginSection() {
             ),
           );
         }
+      } finally {
+        if (!cancelled) setSessionRecoveryComplete(true);
       }
     };
 
@@ -1063,6 +1127,8 @@ export default function StewardLoginSection() {
     refreshToken?: string | null,
     options?: { verifiedPhone: string },
   ) {
+    setPasskeyEmailGrant(null);
+    setShowPasskeyEnrollmentRecovery(false);
     if (options) {
       await syncStewardSessionCookie(token, refreshToken, options);
     } else {
@@ -1077,6 +1143,50 @@ export default function StewardLoginSection() {
       resolveLoginReturnTo(searchParams, consumePendingOAuthReturnTo()),
     );
     setStep("success");
+  }
+
+  async function handleLocalDedicatedSignIn() {
+    if (!LOCAL_DEDICATED_TEST_API_KEY) return;
+    setLoading("local");
+    setError(null);
+    try {
+      const localSessionUrl = new URL(
+        "/api/test/auth/session",
+        import.meta.env.VITE_API_URL || window.location.origin,
+      );
+      const response = await fetch(localSessionUrl, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Authorization: `Bearer ${LOCAL_DEDICATED_TEST_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      });
+      const result = parseLocalTestSessionResponse(await response.text());
+      if (!response.ok || !result.token) {
+        throw new Error(
+          result.error ?? "Could not start the local Cloud test session.",
+        );
+      }
+      // `useSessionAuth` recognises the Playwright marker cookie as the
+      // test-session signal; the API only sets the httpOnly session cookie,
+      // so this dev-only path must plant the readable marker itself.
+      // biome-ignore lint/suspicious/noDocumentCookie: the marker must be readable synchronously by the session hook; the Cookie Store API is async and not universally available.
+      document.cookie = "eliza-test-auth=1; Path=/; SameSite=Lax; Max-Age=3600";
+      await persistStewardToken(LOCAL_DEDICATED_TEST_API_KEY);
+      window.dispatchEvent(new CustomEvent("steward-token-sync"));
+      setRedirectTo(resolveLoginReturnTo(searchParams));
+      setStep("success");
+    } catch (localSignInError) {
+      setError(
+        getErrorMessage(
+          localSignInError,
+          "Could not start the local Cloud test session.",
+        ),
+      );
+    } finally {
+      setLoading(null);
+    }
   }
 
   function isBrowserOwnedWebAuthnFailure(e: unknown, msg: string): boolean {
@@ -1102,6 +1212,26 @@ export default function StewardLoginSection() {
     );
   }
 
+  function isPasskeyAlreadyRegistered(e: unknown): boolean {
+    const msg = getErrorMessage(e, "").toLowerCase();
+    if (
+      e instanceof StewardApiError &&
+      e.status === 409 &&
+      (msg.includes("passkey already") ||
+        msg.includes("credential already") ||
+        msg.includes("already registered"))
+    ) {
+      return true;
+    }
+    if (!isBrowserOwnedWebAuthnFailure(e, msg)) return false;
+    return (
+      msg.includes("previously registered") ||
+      msg.includes("already registered") ||
+      msg.includes("invalidstateerror") ||
+      msg.includes("error_authenticator_previously_registered")
+    );
+  }
+
   // UV errors surface when the Steward server or browser WebAuthn layer requires
   // user verification (PIN/biometric) but the assertion didn't satisfy it. They
   // must NOT silently fall through to startPasskeySignup() — the user already
@@ -1116,30 +1246,36 @@ export default function StewardLoginSection() {
     );
   }
 
-  async function handlePasskey() {
+  function validatePasskeyIntent(): boolean {
     if (!showPasskey) {
       if (providers.email !== false) {
-        await handleEmail();
-        return;
+        void handleEmail();
+        return false;
       }
       setError(
         "Passkeys are not available in this browser. Use Google, Discord, or open this sign-in link on another device.",
       );
-      return;
+      return false;
     }
     if (!email.trim()) {
       setError("Enter your email first");
-      return;
+      return false;
     }
+    return true;
+  }
+
+  async function runScopedPasskeyLogin() {
     setLoading("passkey");
     setError(null);
     setShowPasskeyRecovery(false);
+    setShowPasskeyEnrollmentRecovery(false);
     try {
       const result = requireCompletedAuth(
         await auth.signInWithPasskey(email.trim(), {
           fallbackToRegistration: false,
         }),
       );
+      await rememberPasskeyDeviceHint(email);
       await handleSuccess(result.token, result.refreshToken);
     } catch (e: unknown) {
       // error-policy:J4 authentication failures remain visibly distinct and
@@ -1149,14 +1285,9 @@ export default function StewardLoginSection() {
           "Passkey sign-in requires device verification (PIN or biometric). Your device may not support this — try Magic Link instead.",
         );
         setLoading(null);
-      } else if (
-        isUserCancelled(e) ||
-        (e instanceof StewardApiError && e.status === 404)
-      ) {
-        // A discoverable-credential request intentionally cannot reveal whether
-        // an account or passkey exists. Chromium reports the same NotAllowedError
-        // for an empty credential result and a cancelled prompt, so recovery must
-        // remain an explicit user choice instead of silently sending signup mail.
+      } else if (isUserCancelled(e)) {
+        // A browser-owned cancellation is ambiguous, so keep recovery as an
+        // explicit user choice rather than sending signup mail automatically.
         setShowPasskeyRecovery(true);
         setLoading(null);
       } else {
@@ -1166,11 +1297,34 @@ export default function StewardLoginSection() {
     }
   }
 
+  async function handlePasskey() {
+    if (!validatePasskeyIntent()) return;
+    setLoading("passkey");
+    setError(null);
+    setShowPasskeyRecovery(false);
+
+    const hinted = await hasPasskeyDeviceHint(email);
+    if (!hinted) {
+      // A new device-local email goes straight to verified enrollment. This
+      // decision never asks Steward whether an account or passkey exists.
+      await startPasskeySignup();
+      return;
+    }
+    await runScopedPasskeyLogin();
+  }
+
+  async function handleExistingPasskey() {
+    if (!validatePasskeyIntent()) return;
+    await runScopedPasskeyLogin();
+  }
+
   async function startPasskeySignup() {
     setLoading("passkey");
     setError(null);
     try {
       await auth.sendEmailOtp(email.trim());
+      setPasskeyEmailGrant(null);
+      setShowPasskeyEnrollmentRecovery(false);
       setOtpCode("");
       setShowPasskeyRecovery(false);
       setStep("otp-entry");
@@ -1189,20 +1343,47 @@ export default function StewardLoginSection() {
     }
     setLoading("passkey");
     setError(null);
+    setShowPasskeyEnrollmentRecovery(false);
     try {
-      const { emailGrant } = await auth.verifyEmailOtp(email.trim(), code);
+      let emailGrant = passkeyEmailGrant;
+      if (!emailGrant) {
+        ({ emailGrant } = await auth.verifyEmailOtp(email.trim(), code));
+        setPasskeyEmailGrant(emailGrant);
+      }
       const result = requireCompletedAuth(
         await auth.addPasskey(email.trim(), { emailGrant }),
       );
+      await rememberPasskeyDeviceHint(email);
       await handleSuccess(result.token, result.refreshToken);
     } catch (e: unknown) {
+      // error-policy:J4 an OTP-proven account with a persisted credential
+      // recovers through authentication; ambiguous browser cancellation keeps
+      // registration retry plus explicit alternate sign-in choices visible.
+      if (isPasskeyAlreadyRegistered(e)) {
+        await rememberPasskeyDeviceHint(email);
+        setPasskeyEmailGrant(null);
+        setOtpCode("");
+        setShowPasskeyEnrollmentRecovery(false);
+        setStep("idle");
+        await runScopedPasskeyLogin();
+        return;
+      }
       if (isUserCancelled(e)) {
         setError("Passkey setup was cancelled. Tap Create passkey to retry.");
+        setShowPasskeyEnrollmentRecovery(true);
       } else {
         setError(getErrorMessage(e, "That code didn't work. Try again."));
       }
       setLoading(null);
     }
+  }
+
+  async function handleEnrollmentExistingPasskey() {
+    setPasskeyEmailGrant(null);
+    setOtpCode("");
+    setShowPasskeyEnrollmentRecovery(false);
+    setStep("idle");
+    await runScopedPasskeyLogin();
   }
 
   async function handleEmail() {
@@ -1212,6 +1393,8 @@ export default function StewardLoginSection() {
     }
     setLoading("email");
     setError(null);
+    setPasskeyEmailGrant(null);
+    setShowPasskeyEnrollmentRecovery(false);
     try {
       // The magic link can open in a new same-origin tab. Persist the pending
       // destination before asking Steward to send it so the callback can
@@ -1454,7 +1637,7 @@ export default function StewardLoginSection() {
     return (
       <ReservedLoginFrame>
         <div className="flex flex-col items-center gap-4" role="status">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border-strong border-t-accent motion-reduce:animate-none" />
+          <div className="size-8 animate-spin rounded-full border-2 border-border-strong border-t-accent motion-reduce:animate-none" />
           <p className="text-sm text-muted">
             {t("cloud.login.completingSignIn", {
               defaultValue: "Completing sign-in…",
@@ -1469,7 +1652,7 @@ export default function StewardLoginSection() {
     return (
       <ReservedLoginFrame>
         <div className="flex flex-col items-center gap-4" role="status">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border-strong border-t-accent motion-reduce:animate-none" />
+          <div className="size-8 animate-spin rounded-full border-2 border-border-strong border-t-accent motion-reduce:animate-none" />
           <p className="text-sm text-muted">
             {t("cloud.login.redirecting", {
               defaultValue: "Redirecting to Eliza...",
@@ -1860,6 +2043,48 @@ export default function StewardLoginSection() {
           })}
         </Button>
 
+        {showPasskeyEnrollmentRecovery && (
+          <section
+            aria-label={t("cloud.login.otp.recoveryLabel", {
+              defaultValue: "Other passkey options",
+            })}
+            className="space-y-2 rounded-md border border-border-strong bg-bg-elevated p-3"
+          >
+            <p className="text-xs leading-relaxed text-muted">
+              {t("cloud.login.otp.recoveryMessage", {
+                defaultValue:
+                  "Already saved this passkey? Sign in with it, or use a Magic Link.",
+              })}
+            </p>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <Button
+                variant="ghost"
+                type="button"
+                onClick={handleEnrollmentExistingPasskey}
+                disabled={loading !== null}
+                className="min-h-touch rounded-md border border-border-strong px-3 py-2.5 text-sm font-semibold text-txt hover:border-border-hover hover:bg-bg-hover"
+              >
+                {t("cloud.login.button.existingPasskey", {
+                  defaultValue: "Use existing passkey",
+                })}
+              </Button>
+              {providers.email !== false && (
+                <Button
+                  variant="ghost"
+                  type="button"
+                  onClick={handleEmail}
+                  disabled={loading !== null}
+                  className="min-h-touch rounded-md border border-border-strong px-3 py-2.5 text-sm font-semibold text-txt hover:border-border-hover hover:bg-bg-hover"
+                >
+                  {t("cloud.login.passkeyRecovery.magicLink", {
+                    defaultValue: "Use Magic Link",
+                  })}
+                </Button>
+              )}
+            </div>
+          </section>
+        )}
+
         <div className="flex items-center justify-between text-sm">
           <Button
             variant="ghost"
@@ -1868,6 +2093,8 @@ export default function StewardLoginSection() {
             onClick={() => {
               setStep("idle");
               setOtpCode("");
+              setPasskeyEmailGrant(null);
+              setShowPasskeyEnrollmentRecovery(false);
               setError(null);
               setLoading(null);
             }}
@@ -1891,7 +2118,7 @@ export default function StewardLoginSection() {
   // Provider discovery in flight: a pulsing skeleton with the final option
   // stack's exact geometry, so the real options materialize in place with no
   // card resize (#18256) instead of replacing a short spinner block.
-  if (!providersLoaded) {
+  if (!providersLoaded || !sessionRecoveryComplete) {
     return (
       <div
         role="status"
@@ -1924,6 +2151,26 @@ export default function StewardLoginSection() {
         </Alert>
       )}
 
+      {LOCAL_DEDICATED_TEST_SIGN_IN_ENABLED && (
+        <div className="space-y-2">
+          <Button
+            type="button"
+            onClick={handleLocalDedicatedSignIn}
+            disabled={isLoading}
+            className="hosted-signin-focus-emphasis min-h-touch w-full rounded-md bg-accent px-4 py-3 font-semibold text-accent-foreground transition-[background-color,transform] hover:bg-accent-hover hover:text-accent-foreground active:scale-[0.99] disabled:pointer-events-none disabled:bg-accent/80"
+          >
+            {loading === "local" ? <Spinner /> : null}
+            {loading === "local"
+              ? "Starting local session…"
+              : "Continue with local test account"}
+          </Button>
+          <p className="text-center text-xs leading-relaxed text-muted">
+            Development only. Uses the real local Cloud account, balance, and
+            permissions paths.
+          </p>
+        </div>
+      )}
+
       {providers.sms && (
         <>
           <div className="space-y-2">
@@ -1933,7 +2180,7 @@ export default function StewardLoginSection() {
             >
               {t("cloud.login.phoneLabel", { defaultValue: "Phone number" })}
             </label>
-            <div className="flex w-full min-h-touch overflow-hidden rounded-md border border-input bg-bg-elevated transition-colors hover:border-border-strong focus-within:border-border-strong">
+            <div className="flex w-full min-h-touch overflow-hidden rounded-md border border-input bg-bg-elevated transition-colors hover:border-border-strong">
               <Select
                 name="phone-country"
                 value={phoneCountry}
@@ -2028,7 +2275,11 @@ export default function StewardLoginSection() {
             defaultValue: "you@example.com",
           })}
           value={email}
-          onChange={(e) => setEmail(e.target.value)}
+          onChange={(e) => {
+            setEmail(e.target.value);
+            setPasskeyEmailGrant(null);
+            setShowPasskeyEnrollmentRecovery(false);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               if (showPasskey) {
@@ -2076,6 +2327,20 @@ export default function StewardLoginSection() {
           </Button>
         )}
       </div>
+
+      {showPasskey && (
+        <Button
+          variant="ghost"
+          type="button"
+          onClick={handleExistingPasskey}
+          disabled={isLoading}
+          className="hosted-signin-focus-emphasis flex w-full min-h-touch items-center justify-center rounded-md px-3 py-2 text-sm font-medium text-muted transition-[color,background-color,transform] hover:bg-bg-hover hover:text-txt active:scale-[0.99] disabled:pointer-events-none disabled:text-muted"
+        >
+          {t("cloud.login.button.existingPasskey", {
+            defaultValue: "Use an existing passkey",
+          })}
+        </Button>
+      )}
 
       {!showPasskey &&
       providers.passkey !== false &&
@@ -2176,7 +2441,7 @@ export default function StewardLoginSection() {
               {loading === "telegram" ? (
                 <Spinner />
               ) : (
-                <TelegramIcon className="h-4 w-4" />
+                <TelegramIcon className="size-4" />
               )}{" "}
               {t("cloud.login.button.telegram", {
                 defaultValue: "Telegram",
@@ -2344,7 +2609,7 @@ export default function StewardLoginSection() {
 
 function Spinner() {
   return (
-    <div className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent opacity-70 motion-reduce:animate-none" />
+    <div className="size-4 animate-spin rounded-full border-2 border-current border-t-transparent opacity-70 motion-reduce:animate-none" />
   );
 }
 
@@ -2368,9 +2633,9 @@ function StewardOAuthIcon({ provider }: { provider: StewardOAuthProvider }) {
     case "google":
       return <GoogleIcon />;
     case "discord":
-      return <DiscordIcon className="h-4 w-4" />;
+      return <DiscordIcon className="size-4" />;
     case "github":
-      return <Github className="h-4 w-4" />;
+      return <Github className="size-4" />;
     case "twitter":
       return <XIcon />;
     case "apple":
@@ -2381,7 +2646,7 @@ function StewardOAuthIcon({ provider }: { provider: StewardOAuthProvider }) {
 function AppleIcon() {
   return (
     <svg
-      className="h-4 w-4"
+      className="size-4"
       viewBox="0 0 24 24"
       fill="currentColor"
       aria-hidden="true"
@@ -2394,7 +2659,7 @@ function AppleIcon() {
 function XIcon() {
   return (
     <svg
-      className="h-4 w-4"
+      className="size-4"
       viewBox="0 0 24 24"
       fill="currentColor"
       aria-hidden="true"
@@ -2406,7 +2671,7 @@ function XIcon() {
 
 function GoogleIcon() {
   return (
-    <svg className="h-4 w-4" viewBox="0 0 24 24" aria-hidden="true">
+    <svg className="size-4" viewBox="0 0 24 24" aria-hidden="true">
       <path
         fill="#4285F4"
         d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"
@@ -2430,7 +2695,7 @@ function GoogleIcon() {
 function PasskeyIcon() {
   return (
     <svg
-      className="h-4 w-4"
+      className="size-4"
       aria-hidden="true"
       viewBox="0 0 24 24"
       fill="none"
@@ -2448,7 +2713,7 @@ function PasskeyIcon() {
 function EmailIcon() {
   return (
     <svg
-      className="h-4 w-4"
+      className="size-4"
       aria-hidden="true"
       viewBox="0 0 24 24"
       fill="none"

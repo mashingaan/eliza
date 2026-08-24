@@ -1,6 +1,7 @@
 /** Coordinates fail-closed account-deletion requests and fenced worker claims. */
 
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { ElizaError } from "@elizaos/core";
 import { accountDeletionRequestsRepository } from "../../db/repositories/account-deletion-requests";
 import type { AccountDeletionExport } from "../../db/schemas/account-deletion-exports";
 import type { AccountDeletionRequest } from "../../db/schemas/account-deletion-requests";
@@ -10,7 +11,6 @@ import type {
   AccountDeletionStatus,
   AccountDeletionStatusDto,
 } from "../../types/account-lifecycle";
-import type { AgentBackupObjectStoreRegistry } from "../storage/agent-backup-object-store";
 import type { RuntimeR2Bucket } from "../storage/r2-runtime-binding";
 import { logger } from "../utils/logger";
 import {
@@ -18,6 +18,7 @@ import {
   reconcileAccountDeletionExportRevocations,
 } from "./account-deletion-export";
 import {
+  type AccountDeletionBackupAuthority,
   type AccountDeletionSpoolAuthority,
   createAccountDeletionProviderAdapters,
 } from "./account-deletion-provider-adapters";
@@ -39,6 +40,7 @@ const IMMEDIATE_PHASE_LEASE_MILLISECONDS = 60 * 1_000;
 // Outlive the export worker lease so a stale in-flight put cannot recreate an object after revoke.
 const EXPORT_REVOCATION_SAFETY_MILLISECONDS = 15 * 60 * 1_000;
 const CANCELLATION_RETRY_MILLISECONDS = 60 * 1_000;
+const OPAQUE_CREDENTIAL_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export const ACCOUNT_DELETION_PHASES = [
   "account_authority",
@@ -46,8 +48,8 @@ export const ACCOUNT_DELETION_PHASES = [
   "steward_deactivation",
   "stripe",
   "domains",
-  "secondary_backups",
   "spools",
+  "secondary_backups",
   "compute_containers",
   "github_repositories",
   "connector_credentials",
@@ -65,8 +67,8 @@ const ACCOUNT_DELETION_PHASE_ORDER = new Map<string, number>([
   ["steward_deactivation", 2],
   ["stripe", 10],
   ["domains", 20],
-  ["secondary_backups", 30],
-  ["spools", 40],
+  ["spools", 30],
+  ["secondary_backups", 40],
   ["compute_containers", 50],
   ["github_repositories", 60],
   ["connector_credentials", 70],
@@ -80,38 +82,48 @@ const ACCOUNT_DELETION_PHASE_ORDER = new Map<string, number>([
 
 export type AccountDeletionConflictCode =
   | "ACCOUNT_UNAVAILABLE"
+  | "ADMISSION_CREDENTIAL_REQUIRED"
   | "ANONYMOUS_ACCOUNT"
   | "REQUEST_REPLAYED"
   | "TRANSFER_REQUIRED"
   | "LIFECYCLE_RESERVATION_REQUIRED";
 
-export class AccountDeletionConflictError extends Error {
+export class AccountDeletionConflictError extends ElizaError {
+  override readonly name = "AccountDeletionConflictError";
+  override readonly code: AccountDeletionConflictCode;
+  readonly details?: Readonly<Record<string, unknown>>;
+
   constructor(
     message: string,
-    readonly code: AccountDeletionConflictCode,
-    readonly details?: Readonly<Record<string, unknown>>,
+    code: AccountDeletionConflictCode,
+    details?: Readonly<Record<string, unknown>>,
   ) {
-    super(message);
-    this.name = "AccountDeletionConflictError";
+    super(message, { code, severity: "fatal" });
+    this.code = code;
+    this.details = details;
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
-export class AccountDeletionRecoveryError extends Error {
-  constructor(
-    message: string,
-    readonly code: "STATUS_CREDENTIAL_INVALID" | "RECOVERY_WINDOW_EXPIRED",
-  ) {
-    super(message);
-    this.name = "AccountDeletionRecoveryError";
+export class AccountDeletionRecoveryError extends ElizaError {
+  override readonly name = "AccountDeletionRecoveryError";
+  override readonly code: "STATUS_CREDENTIAL_INVALID" | "RECOVERY_WINDOW_EXPIRED";
+
+  constructor(message: string, code: "STATUS_CREDENTIAL_INVALID" | "RECOVERY_WINDOW_EXPIRED") {
+    super(message, { code, severity: "fatal" });
+    this.code = code;
+    Object.setPrototypeOf(this, new.target.prototype);
   }
 }
 
 function publicStatus(status: AccountDeletionRequest["status"]): AccountDeletionStatus {
-  return status === "requested" ? "reserved" : status;
+  return status === "requested" ? "pending_activation" : status;
 }
 
 function nextActionForStatus(status: AccountDeletionStatus): AccountDeletionNextAction {
   switch (status) {
+    case "pending_activation":
+      return "confirm_recovery_package";
     case "reserved":
       return "wait_for_export";
     case "recovery":
@@ -142,7 +154,12 @@ export function toAccountDeletionRequestDto(
     irreversibleAt: request.irreversible_at?.toISOString() ?? null,
     completedAt: request.completed_at?.toISOString() ?? null,
     identityDeactivated: request.identity_deactivated_at !== null,
-    accessState: status === "completed" ? "erased" : status === "canceled" ? "active" : "fenced",
+    accessState:
+      status === "completed"
+        ? "erased"
+        : status === "canceled" || status === "pending_activation"
+          ? "active"
+          : "fenced",
     canCancel: status === "reserved" || status === "recovery",
     nextAction: nextActionForStatus(status),
     export: exportReceipt
@@ -156,8 +173,15 @@ export function toAccountDeletionRequestDto(
   };
 }
 
-export async function getOpenAccountDeletionRequest(userId: string) {
-  return await accountDeletionRequestsRepository.findOpenByUserId(userId);
+export async function getOpenAccountDeletionRequest(input: {
+  userId: string;
+  organizationId: string;
+}) {
+  return await accountDeletionRequestsRepository.findOpenByUserAndOrganizationId(
+    input.userId,
+    input.organizationId,
+    true,
+  );
 }
 
 export async function getAccountDeletionStatusByCredential(
@@ -167,6 +191,51 @@ export async function getAccountDeletionStatusByCredential(
   const tokenHash = createHash("sha256").update(statusCredential).digest("hex");
   const record = await accountDeletionRequestsRepository.findByStatusTokenHash(tokenHash);
   return record ? toAccountDeletionRequestDto(record.request, record.exportReceipt) : null;
+}
+
+function hashOpaqueCredential(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function deriveAdmissionCapabilities(admissionCredential: string): {
+  statusCredential: string;
+  recoveryCredential: string;
+} {
+  return {
+    statusCredential: createHash("sha256")
+      .update(`account-deletion-status:v1:${admissionCredential}`)
+      .digest("base64url"),
+    recoveryCredential: createHash("sha256")
+      .update(`account-deletion-recovery:v1:${admissionCredential}`)
+      .digest("base64url"),
+  };
+}
+
+/**
+ * Re-delivers only the first receipt's deterministic capabilities after a
+ * committed response is lost. The client secret is never persisted in plaintext.
+ */
+export async function recoverAccountDeletionAdmission(
+  admissionCredential: string,
+  now = new Date(),
+): Promise<AccountDeletionAcceptedDto | null> {
+  if (!OPAQUE_CREDENTIAL_PATTERN.test(admissionCredential)) return null;
+  const record = await accountDeletionRequestsRepository.findByAdmissionTokenHash(
+    hashOpaqueCredential(admissionCredential),
+    now,
+  );
+  if (!record) return null;
+  const capabilities = deriveAdmissionCapabilities(admissionCredential);
+  if (
+    hashOpaqueCredential(capabilities.statusCredential) !== record.request.status_token_hash ||
+    hashOpaqueCredential(capabilities.recoveryCredential) !== record.request.recovery_token_hash
+  ) {
+    return null;
+  }
+  return {
+    request: toAccountDeletionRequestDto(record.request, record.exportReceipt),
+    ...capabilities,
+  };
 }
 
 export async function cancelAccountDeletion(
@@ -219,14 +288,23 @@ export async function requestAccountDeletion(input: {
   userId: string;
   organizationId: string;
   stewardUserId: string;
+  admissionCredential: string;
   now?: Date;
 }): Promise<AccountDeletionAcceptedDto> {
+  if (!OPAQUE_CREDENTIAL_PATTERN.test(input.admissionCredential)) {
+    throw new AccountDeletionConflictError(
+      "A valid deletion admission credential is required",
+      "ADMISSION_CREDENTIAL_REQUIRED",
+    );
+  }
   const now = input.now ?? new Date();
   const requestId = randomUUID();
-  const statusCredential = randomBytes(32).toString("base64url");
-  const recoveryCredential = randomBytes(32).toString("base64url");
-  const statusTokenHash = createHash("sha256").update(statusCredential).digest("hex");
-  const recoveryTokenHash = createHash("sha256").update(recoveryCredential).digest("hex");
+  const { statusCredential, recoveryCredential } = deriveAdmissionCapabilities(
+    input.admissionCredential,
+  );
+  const statusTokenHash = hashOpaqueCredential(statusCredential);
+  const recoveryTokenHash = hashOpaqueCredential(recoveryCredential);
+  const admissionTokenHash = hashOpaqueCredential(input.admissionCredential);
   const recoveryExpiresAt = new Date(now.getTime() + RECOVERY_WINDOW_MILLISECONDS);
   const statusTokenExpiresAt = new Date(now.getTime() + STATUS_CREDENTIAL_RETENTION_MILLISECONDS);
   const requestDigest = createHash("sha256")
@@ -238,7 +316,7 @@ export async function requestAccountDeletion(input: {
     idempotencyKeyDigest: createHash("sha256")
       .update(`account-deletion-phase:v1:${requestId}:${phase}`)
       .digest("hex"),
-    completed: phase === "account_authority",
+    completed: false,
   }));
 
   const reservation = await accountDeletionRequestsRepository.reservePersonalAccountDeletion({
@@ -252,6 +330,8 @@ export async function requestAccountDeletion(input: {
     statusTokenExpiresAt,
     recoveryTokenHash,
     recoveryTokenExpiresAt: recoveryExpiresAt,
+    admissionTokenHash,
+    admissionTokenExpiresAt: recoveryExpiresAt,
     requestDigest,
     phases,
   });
@@ -282,17 +362,80 @@ export async function requestAccountDeletion(input: {
     );
   }
 
-  await attemptImmediateStewardDeactivation({
-    requestId: reservation.request.id,
-    stewardUserId: input.stewardUserId,
-    now,
-  });
+  if (reservation.outcome === "replayed") {
+    if (
+      reservation.request.status_token_hash !== statusTokenHash ||
+      reservation.request.recovery_token_hash !== recoveryTokenHash
+    ) {
+      throw new AccountDeletionConflictError(
+        "The deletion admission receipt failed capability verification",
+        "ACCOUNT_UNAVAILABLE",
+      );
+    }
+    return {
+      request: toAccountDeletionRequestDto(reservation.request),
+      statusCredential,
+      recoveryCredential,
+    };
+  }
 
   return {
     request: toAccountDeletionRequestDto(reservation.request),
     statusCredential,
     recoveryCredential,
   };
+}
+
+/**
+ * Activates a pre-fence reservation only after the client proves possession of
+ * its durably stored recovery package. Replays drive a missing Steward call
+ * through the same generation-fenced phase instead of issuing a second call.
+ */
+export async function activateAccountDeletion(
+  recoveryCredential: string,
+  now = new Date(),
+): Promise<AccountDeletionStatusDto> {
+  if (!OPAQUE_CREDENTIAL_PATTERN.test(recoveryCredential)) {
+    throw new AccountDeletionRecoveryError(
+      "Recovery credential is invalid",
+      "STATUS_CREDENTIAL_INVALID",
+    );
+  }
+  const activation =
+    await accountDeletionRequestsRepository.activateReservedPersonalAccountDeletion({
+      recoveryTokenHash: hashOpaqueCredential(recoveryCredential),
+      now,
+    });
+  if (activation.outcome === "invalid_credential") {
+    throw new AccountDeletionRecoveryError(
+      "Recovery credential is invalid or expired",
+      "STATUS_CREDENTIAL_INVALID",
+    );
+  }
+  if (activation.outcome === "account_unavailable") {
+    throw new AccountDeletionConflictError("Account is no longer available", "ACCOUNT_UNAVAILABLE");
+  }
+  if (activation.outcome === "transfer_required") {
+    throw new AccountDeletionConflictError(
+      "Transfer or revoke shared organization resources before deleting this account",
+      "TRANSFER_REQUIRED",
+      {
+        successorOwnerRequired: true,
+        activeOwnerCount: activation.activeOwnerCount,
+      },
+    );
+  }
+
+  const request = activation.request;
+  if ((request.status === "reserved" || request.status === "recovery") && request.steward_user_id) {
+    await attemptImmediateStewardDeactivation({
+      requestId: request.id,
+      stewardUserId: request.steward_user_id,
+      now,
+    });
+  }
+  const latest = await accountDeletionRequestsRepository.findById(request.id);
+  return toAccountDeletionRequestDto(latest ?? request);
 }
 
 async function attemptImmediateStewardDeactivation(input: {
@@ -495,7 +638,10 @@ async function reconcileCancelingStewardReactivations(input: {
     try {
       await reactivateStewardPlatformUser(request.steward_user_id);
       if ((await inspectStewardPlatformUser(request.steward_user_id)) !== "active") {
-        throw new Error("Steward reactivation was not visible after acknowledgement");
+        throw new ElizaError("Steward reactivation was not visible after acknowledgement", {
+          code: "ACCOUNT_DELETION_STEWARD_REACTIVATION_NOT_VISIBLE",
+          severity: "ephemeral",
+        });
       }
       const completed = await accountDeletionRequestsRepository.completeStewardReactivationPhase({
         requestId: request.id,
@@ -539,7 +685,7 @@ export interface ProcessAccountDeletionResult {
 export interface ProcessAccountDeletionResources {
   blob: RuntimeR2Bucket;
   adapters?: AccountDeletionProviderAdapters;
-  backupRegistry?: AgentBackupObjectStoreRegistry;
+  backupAuthority?: AccountDeletionBackupAuthority;
   spoolAuthority?: AccountDeletionSpoolAuthority;
   purgeOrganizationResources?: typeof purgePersonalOrganizationResources;
 }
@@ -554,10 +700,19 @@ function requireProcessAccountDeletionResources(
     typeof blob.put !== "function" ||
     typeof blob.delete !== "function"
   ) {
-    throw new Error("Account deletion requires a valid Cloud object-storage binding");
+    throw new ElizaError("Account deletion requires a valid Cloud object-storage binding", {
+      code: "ACCOUNT_DELETION_OBJECT_STORAGE_INVALID",
+      severity: "fatal",
+    });
   }
   if (!resources.purgeOrganizationResources && typeof blob.list !== "function") {
-    throw new Error("Account deletion's default resource purge requires Cloud object listing");
+    throw new ElizaError(
+      "Account deletion's default resource purge requires Cloud object listing",
+      {
+        code: "ACCOUNT_DELETION_OBJECT_LISTING_UNAVAILABLE",
+        severity: "fatal",
+      },
+    );
   }
 }
 
@@ -581,7 +736,7 @@ export async function processDueAccountDeletions(
   const adapters =
     resources.adapters ??
     createAccountDeletionProviderAdapters({
-      backupRegistry: resources.backupRegistry,
+      backupAuthority: resources.backupAuthority,
       spoolAuthority: resources.spoolAuthority,
     });
   const stewardDeactivations = await reconcileRecoveryStewardDeactivations({
@@ -668,10 +823,16 @@ export async function processDueAccountDeletions(
   for (const request of due) {
     try {
       if (!request.steward_user_id || !request.user_id) {
-        throw new Error("Claimed deletion request is missing account identifiers");
+        throw new ElizaError("Claimed deletion request is missing account identifiers", {
+          code: "ACCOUNT_DELETION_CLAIM_IDENTIFIERS_MISSING",
+          severity: "fatal",
+        });
       }
       if (!request.organization_id) {
-        throw new Error("Claimed deletion request is missing its organization identifier");
+        throw new ElizaError("Claimed deletion request is missing its organization identifier", {
+          code: "ACCOUNT_DELETION_CLAIM_ORGANIZATION_MISSING",
+          severity: "fatal",
+        });
       }
       if (!request.processing_started_at) {
         logger.error("[AccountDeletion] Claimed request is missing its generation", {

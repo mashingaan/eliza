@@ -12,6 +12,7 @@ import type {
   TokenUsage,
 } from "@elizaos/core";
 import {
+	assertModelOutputComplete,
   buildCanonicalSystemPrompt,
   DEFAULT_CEREBRAS_TEXT_MODEL,
   ElizaError,
@@ -212,6 +213,8 @@ type ResponsesApiResponse = Record<string, unknown> & {
     output_tokens?: number;
     total_tokens?: number;
   } & Record<string, unknown>;
+	status?: string;
+	incomplete_details?: { reason?: string } & Record<string, unknown>;
 };
 
 /**
@@ -975,11 +978,11 @@ function buildNativeRequestBody(
     model: modelName,
     messages: buildNativeMessages(params, promptText, systemPrompt),
   };
-  // Omit the cap entirely when the caller opted out (direct-channel Stage-1):
-  // a hardcoded max_tokens 400s on a model whose real limit differs. Every other
-  // caller keeps the 8192 default so it stays bounded.
-  if (!params.omitMaxTokens) {
-    requestBody.max_tokens = params.maxTokens ?? 8192;
+  // An omitted output budget remains omitted. The selected provider owns its
+  // real model boundary; core defaults would silently turn a complete request
+  // into a partial completion. Explicit values are forwarded unchanged.
+  if (!params.omitMaxTokens && params.maxTokens !== undefined) {
+    requestBody.max_tokens = params.maxTokens;
   }
 
   if (!isReasoningModel(modelName) && typeof params.temperature === "number") {
@@ -1290,8 +1293,8 @@ async function generateTextWithModel(
     model: modelName,
     input,
   };
-  if (!params.omitMaxTokens) {
-    requestBody.max_output_tokens = params.maxTokens ?? 8192;
+  if (!params.omitMaxTokens && params.maxTokens !== undefined) {
+    requestBody.max_output_tokens = params.maxTokens;
   }
   if (!reasoning && typeof params.temperature === "number") {
     requestBody.temperature = params.temperature;
@@ -1349,6 +1352,20 @@ async function generateTextWithModel(
     }
     throw requestError;
   }
+
+	if (data.status === "incomplete") {
+		throw new ElizaError(
+			"elizaOS Cloud returned an incomplete Responses API output.",
+			{
+				code: "MODEL_OUTPUT_INCOMPLETE",
+				context: {
+					provider: "elizacloud",
+					model: modelName,
+					reason: data.incomplete_details?.reason,
+				},
+			},
+		);
+	}
 
   if (data.usage) {
     emitModelUsageEvent(
@@ -1471,6 +1488,11 @@ export async function generateNativeChatCompletion(
 
   const text = extractChatCompletionText(data);
   const toolCalls = extractNativeToolCalls(data);
+	assertModelOutputComplete({
+		finishReason: data.choices?.[0]?.finish_reason,
+		provider: "elizacloud",
+		model: context.modelName,
+	});
   if (!text.trim() && toolCalls.length === 0) {
     throw new Error("elizaOS Cloud returned no text or tool calls");
   }
@@ -1940,6 +1962,11 @@ export async function streamNativeChatCompletion(
     const text = extractChatCompletionText(data);
     const toolCalls = extractNativeToolCalls(data);
     const usage = convertNativeUsage(data.usage);
+		assertModelOutputComplete({
+			finishReason: data.choices?.[0]?.finish_reason,
+			provider: "elizacloud",
+			model: context.modelName,
+		});
     if (usage) {
       emitModelUsageEvent(runtime, modelType, context.prompt, usage, {
         modelName: context.modelName,
@@ -2108,6 +2135,11 @@ export async function streamNativeChatCompletion(
       if (!finishReason) {
         throw invalidNativeStream("stream ended without a terminal finish frame");
       }
+			assertModelOutputComplete({
+				finishReason,
+				provider: "elizacloud",
+				model: context.modelName,
+			});
       const toolCalls = finalizeStreamedToolCalls(toolAcc);
       if (!accumulated.trim() && toolCalls.length === 0) {
         throw invalidNativeStream("stream completed without text or tool calls");

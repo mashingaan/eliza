@@ -1147,8 +1147,9 @@ export interface IDatabaseAdapter<DB extends object = object> {
 		 */
 		includeEmbedding?: boolean;
 		/**
-		 * Requester identity to scope retrieval to. When omitted, no
-		 * access-context filtering is applied (single-tenant behavior).
+		 * Requester authority used to intersect disclosure scope and any supplied
+		 * world/authorized-room bounds before ordering and pagination. When omitted,
+		 * no access-context filtering is applied (single-tenant behavior).
 		 */
 		accessContext?: AccessContext;
 	}): Promise<Memory[]>;
@@ -1235,8 +1236,9 @@ export interface IDatabaseAdapter<DB extends object = object> {
 		textContains?: string;
 		includeEmbedding?: boolean;
 		/**
-		 * Requester identity to scope retrieval to. When omitted, no
-		 * access-context filtering is applied (single-tenant behavior).
+		 * Requester authority used to intersect disclosure scope and any supplied
+		 * world/authorized-room bounds before ordering and pagination. When omitted,
+		 * no access-context filtering is applied (single-tenant behavior).
 		 */
 		accessContext?: AccessContext;
 	}): Promise<Memory[]>;
@@ -1314,6 +1316,7 @@ export interface IDatabaseAdapter<DB extends object = object> {
 		match_threshold?: number;
 		count?: number;
 		limit?: number;
+		offset?: number;
 		unique?: boolean;
 		tableName: string;
 		query?: string;
@@ -1321,8 +1324,9 @@ export interface IDatabaseAdapter<DB extends object = object> {
 		worldId?: UUID;
 		entityId?: UUID;
 		/**
-		 * Requester identity to scope retrieval to. When omitted, no
-		 * access-context filtering is applied (single-tenant behavior).
+		 * Requester authority used to intersect disclosure scope and any supplied
+		 * world/authorized-room bounds before vector ranking and pagination. When
+		 * omitted, no access-context filtering is applied (single-tenant behavior).
 		 */
 		accessContext?: AccessContext;
 	}): Promise<Memory[]>;
@@ -1618,6 +1622,7 @@ export interface IDatabaseAdapter<DB extends object = object> {
 	 */
 	getTasks(params: {
 		roomId?: UUID;
+		worldId?: UUID;
 		tags?: string[];
 		entityId?: UUID;
 		/** Required. Only tasks with agentId in this array are returned. Single agent = [id]. WHY: multi-tenant safety; schema indexes by agent_id; daemon batches one getTasks(agentIds) for many agents. */

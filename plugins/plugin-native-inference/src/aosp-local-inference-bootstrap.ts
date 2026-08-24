@@ -1907,9 +1907,9 @@ async function ensureAospLoaderOwner(
  * native lane) acquire the shared {@link getInferencePriorityGate} first:
  * interactive turns dispatch ahead of queued background jobs; background jobs
  * run only when the lane is idle, wait at most the RAM-class bound before
- * failing back to their scheduler, and are clamped to the RAM-class budget
- * (`maxTokens` + prompt size) so one autonomous job cannot hold the lane for
- * multi-minute stretches on a constrained phone.
+ * failing back to their scheduler, and reject unsupported output requests
+ * before dispatch so a partial generation is never reported as the requested
+ * result.
  *
  * Exported for unit tests; production callers go through the registered
  * TEXT_SMALL / TEXT_LARGE handlers.
@@ -1926,17 +1926,12 @@ export async function generateOnPriorityLane(
     const budget = resolveBackgroundInferenceBudget(
       classifyInferenceRamClass(),
     );
-    const clampedArgs = applyBackgroundInferenceBudget(
+    const budgetedArgs = applyBackgroundInferenceBudget(
       { prompt: args.prompt, maxTokens: args.maxTokens },
       budget,
     );
-    if (clampedArgs.clamped.length > 0) {
-      logger.info(
-        `[aosp-local-inference] background generate clamped to the device-class budget: ${clampedArgs.clamped.join(", ")} (#11914)`,
-      );
-    }
-    args.prompt = clampedArgs.prompt;
-    args.maxTokens = clampedArgs.maxTokens;
+    args.prompt = budgetedArgs.prompt;
+    args.maxTokens = budgetedArgs.maxTokens;
     lockWaitMs = budget.lockWaitMs;
   }
   return getInferencePriorityGate().runExclusive(
@@ -2240,7 +2235,7 @@ function isFfiNullPointer(value: unknown): boolean {
  * hand-written {@link AospFusedLlmSymbols} interface (different function
  * representations), so the assertion is centralized here — one auditable FFI
  * boundary instead of the same `as unknown as` double-cast repeated inline at
- * every `createAospStreamingLlmBinding` call site (#12452 type-safety ratchet).
+ * every `createAospStreamingLlmBinding` call site (#12452 type-safety guard).
  */
 function asFusedLlmSymbols(symbols: unknown): AospFusedLlmSymbols {
   return symbols as AospFusedLlmSymbols;
@@ -3411,8 +3406,11 @@ export async function tryBuildAospFusedTextLoader(): Promise<AospLoader | null> 
         throw new Error("[aosp-local-inference] fused text generate aborted");
       }
       const promptTokens = tokenizeFused(active, args.prompt);
+      const maxTokens =
+        args.maxTokens ??
+        Math.max(1, (active.contextSize ?? 32_768) - promptTokens.length);
       const config: AospLlmStreamConfig = {
-        maxTokens: args.maxTokens ?? 512,
+        maxTokens,
         temperature: args.temperature ?? 0.7,
         topP: 0.9,
         topK: 40,
@@ -3434,6 +3432,15 @@ export async function tryBuildAospFusedTextLoader(): Promise<AospLoader | null> 
           ...(args.signal ? { signal: args.signal } : {}),
           ...(args.onTextChunk ? { onTextChunk: args.onTextChunk } : {}),
         });
+        if (result.accepted >= maxTokens) {
+          throw new ElizaError(
+            "AOSP local model output reached the decode boundary before a stop condition",
+            {
+              code: "MODEL_OUTPUT_INCOMPLETE",
+              context: { maxTokens, outputTokens: result.accepted },
+            },
+          );
+        }
         return result.text;
       };
       try {

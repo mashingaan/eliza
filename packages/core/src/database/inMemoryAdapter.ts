@@ -13,10 +13,14 @@
  * containment all mirror the SQL adapters. Persistence is process-local and
  * lost on restart.
  */
+
+import { filterMemoryReadByAccessContext } from "../access-control/filter";
 import {
 	compareMemoryIds,
+	compareTasksForQuery,
 	DatabaseAdapter,
 	validateQueryEntitiesPagination,
+	validateTaskQueryPagination,
 } from "../database";
 import { ElizaError } from "../errors";
 import { rankMessageSearch, withinCreatedAtWindow } from "../search";
@@ -130,6 +134,37 @@ function memoryMatchesMetadata(
 		if (JSON.stringify(metadata[key]) !== JSON.stringify(value)) return false;
 	}
 	return true;
+}
+
+/**
+ * Cosine similarity for in-process vector recall. Returns null when the vectors
+ * cannot be compared (empty, mixed width, non-finite components, or a zero
+ * vector) so a search can skip them instead of inventing a score. A genuine
+ * negative similarity is a valid score, not a sentinel, which is why the
+ * incomparable case is null rather than -1.
+ */
+function cosineSimilarity(left: number[], right: number[]): number | null {
+	if (left.length !== right.length || left.length === 0) return null;
+	let dot = 0;
+	let leftMagnitude = 0;
+	let rightMagnitude = 0;
+	for (let index = 0; index < left.length; index++) {
+		const leftValue = left[index];
+		const rightValue = right[index];
+		if (
+			typeof leftValue !== "number" ||
+			typeof rightValue !== "number" ||
+			!Number.isFinite(leftValue) ||
+			!Number.isFinite(rightValue)
+		) {
+			return null;
+		}
+		dot += leftValue * rightValue;
+		leftMagnitude += leftValue * leftValue;
+		rightMagnitude += rightValue * rightValue;
+	}
+	if (leftMagnitude === 0 || rightMagnitude === 0) return null;
+	return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
 }
 
 function connectorAccountKey(params: {
@@ -270,6 +305,12 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 	readonly documentListQueryCapability = DOCUMENT_LIST_QUERY_CAPABILITY_VERSION;
 	readonly documentRangeReadCapability = 1 as const;
 	db: Record<string, never> = {};
+	private readonly adapterAgentId: UUID;
+
+	constructor(agentId: UUID = DEFAULT_UUID) {
+		super();
+		this.adapterAgentId = agentId;
+	}
 
 	private ready = false;
 
@@ -287,6 +328,8 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 	private memoriesById = new Map<string, Memory>();
 	private memoriesByRoom = new Map<string, Memory[]>();
 	private cache = new Map<string, string>();
+	/** Width last passed to {@link ensureEmbeddingDimension}; used to reclaim stale vectors. */
+	private embeddingDimension: number | undefined;
 
 	private participantsByRoom = new Map<string, Set<string>>();
 	private roomsByParticipant = new Map<string, Set<string>>();
@@ -489,14 +532,34 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 		return Array.from(this.agents.values());
 	}
 
-	async ensureEmbeddingDimension(_dimension: number): Promise<void> {
-		// In-memory vectors are not schema-bound, so there is no dimension migration to apply.
+	async ensureEmbeddingDimension(dimension: number): Promise<void> {
+		this.embeddingDimension = dimension;
 	}
 
 	async clearEmbeddingsOutsideActiveDimension(): Promise<UUID[]> {
-		// In-memory vectors are not schema-bound to a fixed-width column, so there
-		// is no stale-dimension row to reclaim.
-		return [];
+		if (
+			this.embeddingDimension === undefined ||
+			!Number.isFinite(this.embeddingDimension) ||
+			this.embeddingDimension <= 0
+		) {
+			return [];
+		}
+		const active = this.embeddingDimension;
+		const reclaimed: UUID[] = [];
+		for (const memory of this.memoriesById.values()) {
+			if (!Array.isArray(memory.embedding) || memory.embedding.length === 0) {
+				continue;
+			}
+			if (memory.embedding.length === active) {
+				continue;
+			}
+			if (!memory.id) {
+				continue;
+			}
+			delete memory.embedding;
+			reclaimed.push(memory.id);
+		}
+		return reclaimed;
 	}
 
 	async transaction<T>(
@@ -1146,6 +1209,18 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 			all = all.filter((memory) => memoryMatchesMetadata(memory, filterMeta));
 		}
 
+		if (params.accessContext) {
+			all = filterMemoryReadByAccessContext(
+				all,
+				params.accessContext,
+				this.adapterAgentId,
+				params.tableName === "messages" &&
+					params.accessContext.authorizedRoomIds !== undefined
+					? "room"
+					: "private",
+			);
+		}
+
 		// Keyword filter — same case-insensitive `includes` semantics the SQL
 		// adapter pushes down as ILIKE.
 		const textContains = params.textContains?.trim().toLowerCase();
@@ -1234,16 +1309,34 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 			});
 		}
 
+		if (params.accessContext) {
+			all = filterMemoryReadByAccessContext(
+				all,
+				params.accessContext,
+				this.adapterAgentId,
+				params.tableName === "messages" &&
+					params.accessContext.authorizedRoomIds !== undefined
+					? "room"
+					: "private",
+			);
+		}
+
 		// Match plugin-sql ordering: newest first so LIMIT/OFFSET window the
 		// freshest matches.
 		all = all.slice().sort((a, b) => {
 			const ta = typeof a.createdAt === "number" ? a.createdAt : 0;
 			const tb = typeof b.createdAt === "number" ? b.createdAt : 0;
-			return tb - ta;
+			if (ta !== tb) return tb - ta;
+			const aId = typeof a.id === "string" ? a.id : "";
+			const bId = typeof b.id === "string" ? b.id : "";
+			return compareMemoryIds(bId, aId);
 		});
 
 		const offset = typeof params.offset === "number" ? params.offset : 0;
-		const limit = params.limit ?? 20;
+		// Match plugin-sql: omitting `limit` means the complete authorized result,
+		// not an implicit preview page. Model-facing continuity providers rely on
+		// that parity so ALLOW_NO_DATABASE cannot silently lose older history.
+		const limit = params.limit ?? Infinity;
 		return all.slice(offset, offset + limit);
 	}
 
@@ -1266,13 +1359,21 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 		}
 		// The window is applied before ranking + LIMIT/OFFSET, mirroring the SQL
 		// adapters' created_at range conditions.
-		const windowed = candidates.filter((memory) =>
+		let windowed = candidates.filter((memory) =>
 			withinCreatedAtWindow(
 				typeof memory.createdAt === "number" ? memory.createdAt : undefined,
 				params.since,
 				params.until,
 			),
 		);
+		if (params.accessContext) {
+			windowed = filterMemoryReadByAccessContext(
+				windowed,
+				params.accessContext,
+				this.adapterAgentId,
+				"room",
+			);
+		}
 		const ranked = rankMessageSearch(windowed, params.query);
 		const offset = typeof params.offset === "number" ? params.offset : 0;
 		const limit = params.limit ?? 20;
@@ -1369,12 +1470,13 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 		this.logs = this.logs.filter((l) => !idSet.has(String(l.id)));
 	}
 
-	async searchMemories(_params: {
+	async searchMemories(params: {
 		tableName: string;
 		embedding: number[];
 		match_threshold?: number;
 		count?: number;
 		limit?: number;
+		offset?: number;
 		unique?: boolean;
 		query?: string;
 		roomId?: UUID;
@@ -1382,7 +1484,45 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 		entityId?: UUID;
 		accessContext?: AccessContext;
 	}): Promise<Memory[]> {
-		return [];
+		// Scope eligibility first, then the top-K cut — the plugin-sql contract.
+		// A global top-K followed by a post-hoc room/world/entity filter silently
+		// drops eligible matches whenever closer out-of-scope vectors outnumber
+		// the candidate pool. `entityId` is a row predicate here (as in the SQL
+		// vector search), unlike getMemories where it only names the RLS context.
+		const candidates = (
+			await this.getMemories({
+				tableName: params.tableName,
+				roomId: params.roomId,
+				worldId: params.worldId,
+				unique: params.unique,
+				accessContext: params.accessContext,
+			})
+		).filter(
+			(memory) => !params.entityId || memory.entityId === params.entityId,
+		);
+		const limit = params.count ?? params.limit ?? 10;
+		// Same truthiness contract as plugin-sql: an absent or zero threshold
+		// applies no similarity floor.
+		const threshold = params.match_threshold;
+		const scored: Memory[] = [];
+		for (const memory of candidates) {
+			if (!Array.isArray(memory.embedding) || memory.embedding.length === 0) {
+				continue;
+			}
+			const similarity = cosineSimilarity(memory.embedding, params.embedding);
+			if (similarity === null) {
+				continue;
+			}
+			if (threshold && similarity < threshold) {
+				continue;
+			}
+			scored.push({ ...memory, similarity });
+		}
+		scored.sort(
+			(left, right) => (right.similarity ?? -1) - (left.similarity ?? -1),
+		);
+		const offset = params.offset ?? 0;
+		return scored.slice(offset, offset + limit);
 	}
 
 	// Batch memory methods
@@ -1918,16 +2058,19 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 
 	async getTasks(params: {
 		roomId?: UUID;
+		worldId?: UUID;
 		tags?: string[];
 		entityId?: UUID;
 		agentIds: UUID[];
 		limit?: number;
 		offset?: number;
 	}): Promise<Task[]> {
+		validateTaskQueryPagination(params);
 		if (params.agentIds.length === 0) return [];
 		const all = Array.from(this.tasks.values());
 		let filtered = all.filter((t) => {
 			if (params.roomId && t.roomId !== params.roomId) return false;
+			if (params.worldId && t.worldId !== params.worldId) return false;
 			if (params.entityId && t.entityId !== params.entityId) return false;
 			if (t.agentId == null || !params.agentIds.includes(t.agentId))
 				return false;
@@ -1938,6 +2081,8 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 			}
 			return true;
 		});
+
+		filtered.sort(compareTasksForQuery);
 
 		// Paginate to bound result size.
 		const offset = params.offset ?? 0;
@@ -2089,17 +2234,27 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 			if (!isPaged && query.order === undefined) {
 				// Keep the legacy complete-array contract: chronological ordering with
 				// stable insertion order for records sharing a timestamp.
-				requests.sort(
-					(a, b) =>
-						new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-				);
+				requests.sort((a, b) => {
+					const aTime = Number.isFinite(new Date(a.createdAt).getTime())
+						? new Date(a.createdAt).getTime()
+						: 0;
+					const bTime = Number.isFinite(new Date(b.createdAt).getTime())
+						? new Date(b.createdAt).getTime()
+						: 0;
+					return aTime - bTime;
+				});
 				result.push({ channel, agentId, requests });
 				continue;
 			}
 
 			requests.sort((a, b) => {
-				const timeDifference =
-					new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+				const aTime = Number.isFinite(new Date(a.createdAt).getTime())
+					? new Date(a.createdAt).getTime()
+					: 0;
+				const bTime = Number.isFinite(new Date(b.createdAt).getTime())
+					? new Date(b.createdAt).getTime()
+					: 0;
+				const timeDifference = aTime - bTime;
 				if (timeDifference !== 0) return timeDifference * direction;
 				const aId = String(a.id);
 				const bId = String(b.id);
@@ -2175,17 +2330,27 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 			if (!isPaged && query.order === undefined) {
 				// Keep the legacy complete-array contract: chronological ordering with
 				// stable insertion order for records sharing a timestamp.
-				entries.sort(
-					(a, b) =>
-						new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
-				);
+				entries.sort((a, b) => {
+					const aTime = Number.isFinite(new Date(a.createdAt).getTime())
+						? new Date(a.createdAt).getTime()
+						: 0;
+					const bTime = Number.isFinite(new Date(b.createdAt).getTime())
+						? new Date(b.createdAt).getTime()
+						: 0;
+					return aTime - bTime;
+				});
 				result.push({ channel, agentId, entries });
 				continue;
 			}
 
 			entries.sort((a, b) => {
-				const timeDifference =
-					new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+				const aTime = Number.isFinite(new Date(a.createdAt).getTime())
+					? new Date(a.createdAt).getTime()
+					: 0;
+				const bTime = Number.isFinite(new Date(b.createdAt).getTime())
+					? new Date(b.createdAt).getTime()
+					: 0;
+				const timeDifference = aTime - bTime;
 				if (timeDifference !== 0) return timeDifference * direction;
 				const aId = String(a.id);
 				const bId = String(b.id);
@@ -2260,7 +2425,17 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 				(account) => !params.provider || account.provider === params.provider,
 			)
 			.filter((account) => !params.status || account.status === params.status)
-			.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
+			.sort((a, b) => {
+				const bTime =
+					typeof b.updatedAt === "number" && Number.isFinite(b.updatedAt)
+						? b.updatedAt
+						: 0;
+				const aTime =
+					typeof a.updatedAt === "number" && Number.isFinite(a.updatedAt)
+						? a.updatedAt
+						: 0;
+				return bTime - aTime || a.id.localeCompare(b.id);
+			})
 			.slice(offset, offset + limit)
 			.map((account) => ({
 				...account,
@@ -2473,7 +2648,17 @@ export class InMemoryDatabaseAdapter extends DatabaseAdapter<
 		if (!account) return [];
 		return Array.from(this.connectorCredentialRefs.values())
 			.filter((credential) => credential.accountId === params.accountId)
-			.sort((a, b) => b.updatedAt - a.updatedAt || a.id.localeCompare(b.id))
+			.sort((a, b) => {
+				const bTime =
+					typeof b.updatedAt === "number" && Number.isFinite(b.updatedAt)
+						? b.updatedAt
+						: 0;
+				const aTime =
+					typeof a.updatedAt === "number" && Number.isFinite(a.updatedAt)
+						? a.updatedAt
+						: 0;
+				return bTime - aTime || a.id.localeCompare(b.id);
+			})
 			.map((credential) => ({
 				...credential,
 				metadata: cloneConnectorJsonObject(credential.metadata),

@@ -522,6 +522,29 @@ describe("streamNativeChatCompletion", () => {
     expect((await result.usage)?.totalTokens).toBe(5);
   });
 
+  it("rejects a stream whose terminal frame reports an output limit", async () => {
+    nextResponse = sseResponse([
+      dataFrame(contentDelta("partial")),
+      dataFrame({
+        choices: [{ index: 0, delta: {}, finish_reason: "length" }],
+      }),
+      DONE_FRAME,
+    ]);
+    const result = await streamNativeChatCompletion(
+      fakeRuntime(),
+      "TEXT_SMALL" as never,
+      nativeParams(),
+      { modelName: "gpt-oss-120b", prompt: "hi" }
+    );
+
+    await expect(readStream(result)).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_INCOMPLETE",
+    });
+    await expect(result.text).rejects.toMatchObject({
+      code: "MODEL_OUTPUT_INCOMPLETE",
+    });
+  });
+
   it("accepts null usage on choice frames before the usage-only frame", async () => {
     nextResponse = sseResponse([
       dataFrame({ ...contentDelta("hello"), usage: null }),
@@ -1225,7 +1248,7 @@ describe("cloud streaming gate decision (wantsStream)", () => {
     expect(lastJson().stream).not.toBe(true);
   });
 
-  it("omits native max_tokens only when omitMaxTokens is set", async () => {
+  it("omits native max_tokens unless the caller explicitly sets it", async () => {
     nextResponse = bufferedChatResponse("buffered reply");
     await handleResponseHandler(fakeRuntime(), {
       prompt: "hi",
@@ -1239,10 +1262,18 @@ describe("cloud streaming gate decision (wantsStream)", () => {
       prompt: "hi",
       providerOptions: { eliza: {} },
     } as never);
-    expect(lastJson().max_tokens).toBe(8192);
+    expect(lastJson()).not.toHaveProperty("max_tokens");
+
+    nextResponse = bufferedChatResponse("buffered reply");
+    await handleResponseHandler(fakeRuntime(), {
+      prompt: "hi",
+      providerOptions: { eliza: {} },
+      maxTokens: 16384,
+    } as never);
+    expect(lastJson().max_tokens).toBe(16384);
   });
 
-  it("omits responses max_output_tokens only when omitMaxTokens is set", async () => {
+  it("omits responses max_output_tokens unless the caller explicitly sets it", async () => {
     nextResponse = bufferedChatResponse("buffered reply");
     await handleResponseHandler(fakeRuntime(), {
       prompt: "hi",
@@ -1254,7 +1285,33 @@ describe("cloud streaming gate decision (wantsStream)", () => {
     await handleResponseHandler(fakeRuntime(), {
       prompt: "hi",
     } as never);
-    expect(lastJson().max_output_tokens).toBe(8192);
+    expect(lastJson()).not.toHaveProperty("max_output_tokens");
+
+    nextResponse = bufferedChatResponse("buffered reply");
+    await handleResponseHandler(fakeRuntime(), {
+      prompt: "hi",
+      maxTokens: 16384,
+    } as never);
+    expect(lastJson().max_output_tokens).toBe(16384);
+  });
+
+  it("rejects an incomplete Responses API result instead of returning its prefix", async () => {
+    nextResponse = new Response(
+      JSON.stringify({
+        status: "incomplete",
+        incomplete_details: { reason: "max_output_tokens" },
+        output: [
+          {
+            type: "message",
+            content: [{ type: "output_text", text: "partial" }],
+          },
+        ],
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+    await expect(
+      handleResponseHandler(fakeRuntime(), { prompt: "hi" } as never)
+    ).rejects.toMatchObject({ code: "MODEL_OUTPUT_INCOMPLETE" });
   });
 
   it("never logs rendered prompt content while preserving the provider request", async () => {

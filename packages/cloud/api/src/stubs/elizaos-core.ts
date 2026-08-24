@@ -257,6 +257,65 @@ export function toElizaError(
   });
 }
 
+const OUTPUT_LIMIT_FINISH_REASONS = new Set([
+  "length",
+  "max_tokens",
+  "max_output_tokens",
+  "max_completion_tokens",
+  "stop_length",
+  "stopped_limit",
+  "token_limit",
+  "output_limit",
+]);
+
+const INCOMPLETE_FINISH_REASONS = new Set([
+  ...OUTPUT_LIMIT_FINISH_REASONS,
+  "content_filter",
+  "error",
+]);
+
+function normalizeModelFinishReason(reason: string): string {
+  return reason
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_");
+}
+
+/** Worker-safe mirror of core's explicit output-limit classifier. */
+export function isModelOutputLimitFinishReason(reason: unknown): boolean {
+  return (
+    typeof reason === "string" &&
+    OUTPUT_LIMIT_FINISH_REASONS.has(normalizeModelFinishReason(reason))
+  );
+}
+
+/** Worker-safe mirror that rejects provider-confirmed partial model output. */
+export function assertModelOutputComplete(options: {
+  finishReason: unknown;
+  provider: string;
+  model?: string;
+}): void {
+  if (
+    typeof options.finishReason !== "string" ||
+    !INCOMPLETE_FINISH_REASONS.has(
+      normalizeModelFinishReason(options.finishReason),
+    )
+  ) {
+    return;
+  }
+  throw new ElizaError(
+    `[${options.provider}] Model output did not complete successfully (${options.finishReason}).`,
+    {
+      code: "MODEL_OUTPUT_INCOMPLETE",
+      context: {
+        provider: options.provider,
+        ...(options.model ? { model: options.model } : {}),
+        finishReason: options.finishReason,
+      },
+    },
+  );
+}
+
 /** Structural shape of a runtime that can resolve a per-agent setting. */
 export interface SettingReader {
   getSetting(key: string): string | boolean | number | null | undefined;
@@ -493,6 +552,52 @@ export function asUUID(value: string): string {
     throw new Error(`Invalid UUID format: ${value}`);
   }
   return value;
+}
+
+/**
+ * Worker-side mirror of core's owner-entity derivation so shared LifeOps
+ * normalization stays bundle-resolvable: the configured canonical owner
+ * (`ELIZA_ADMIN_ENTITY_ID`, then the first `ELIZA_OWNER_CONTACTS_JSON` entity)
+ * when it is a UUID, otherwise the agent-id seed. Must match
+ * `resolveOwnerEntityIdOrDefault` in `packages/core/src/roles.ts`.
+ */
+export function deterministicOwnerEntityId(agentId: string): string {
+  return stringToUuid(`${agentId}-admin-entity`);
+}
+
+export function resolveOwnerEntityIdOrDefault(runtime: {
+  agentId: string;
+  getSetting?: (key: string) => unknown;
+}): string {
+  const read = (key: string): string | undefined => {
+    const value = runtime.getSetting?.(key);
+    return typeof value === "string" && value.trim() ? value.trim() : undefined;
+  };
+  const candidates: string[] = [];
+  const configured = read("ELIZA_ADMIN_ENTITY_ID");
+  if (configured) candidates.push(configured);
+  const contactsRaw = read("ELIZA_OWNER_CONTACTS_JSON");
+  if (contactsRaw) {
+    const parsed = JSON.parse(contactsRaw) as Record<
+      string,
+      { entityId?: unknown } | null
+    >;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const entry of Object.values(parsed)) {
+        if (
+          entry &&
+          typeof entry.entityId === "string" &&
+          entry.entityId.trim()
+        ) {
+          candidates.push(entry.entityId.trim());
+        }
+      }
+    }
+  }
+  const owner = candidates[0];
+  return owner && UUID_RE.test(owner)
+    ? owner
+    : deterministicOwnerEntityId(runtime.agentId);
 }
 
 export function createUniqueUuid(
@@ -1027,7 +1132,6 @@ export function sendJsonError(
 const CONNECTOR_SOURCE_ALIASES: Record<string, readonly string[]> = {
   discord: ["discord", "discord-local"],
   imessage: ["imessage"],
-  signal: ["signal"],
   slack: ["slack"],
   sms: ["sms"],
   telegram: ["telegram", "telegram-account", "telegramaccount"],

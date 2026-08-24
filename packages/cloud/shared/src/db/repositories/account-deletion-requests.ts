@@ -1,6 +1,20 @@
 /** Persists durable deletion receipts and generation-fenced worker state transitions. */
 
-import { and, asc, eq, gt, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
+import { ElizaError } from "@elizaos/core";
+import {
+  and,
+  asc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  lt,
+  lte,
+  notInArray,
+  or,
+  sql,
+} from "drizzle-orm";
 import { dbRead, dbWrite } from "../helpers";
 import {
   type AccountDeletionExport,
@@ -15,6 +29,7 @@ import {
   accountDeletionRequests,
   type NewAccountDeletionRequest,
 } from "../schemas/account-deletion-requests";
+import { agentSandboxReplacementAttempts } from "../schemas/agent-sandbox-replacement-attempts";
 import { apiKeys } from "../schemas/api-keys";
 import { organizations } from "../schemas/organizations";
 import { userSessions } from "../schemas/user-sessions";
@@ -33,6 +48,8 @@ export interface ReservePersonalAccountDeletionInput {
   statusTokenExpiresAt: Date;
   recoveryTokenHash: string;
   recoveryTokenExpiresAt: Date;
+  admissionTokenHash: string;
+  admissionTokenExpiresAt: Date;
   requestDigest: string;
   phases: ReadonlyArray<{
     phase: string;
@@ -44,9 +61,17 @@ export interface ReservePersonalAccountDeletionInput {
 
 export type ReservePersonalAccountDeletionResult =
   | { outcome: "reserved"; request: AccountDeletionRequest }
+  | { outcome: "replayed"; request: AccountDeletionRequest }
   | { outcome: "existing"; request: AccountDeletionRequest }
   | { outcome: "account_unavailable" }
   | { outcome: "anonymous_account" }
+  | { outcome: "transfer_required"; activeOwnerCount: number };
+
+export type ActivateReservedAccountDeletionResult =
+  | { outcome: "activated"; request: AccountDeletionRequest }
+  | { outcome: "already_activated"; request: AccountDeletionRequest }
+  | { outcome: "invalid_credential" }
+  | { outcome: "account_unavailable" }
   | { outcome: "transfer_required"; activeOwnerCount: number };
 
 export interface AccountDeletionPhaseLease {
@@ -106,10 +131,27 @@ export class AccountDeletionRequestsRepository {
     return request;
   }
 
-  /**
-   * Reserves deletion and publishes every immediate local fence under one
-   * organization/user lock. No provider call occurs inside this transaction.
-   */
+  async findOpenByUserAndOrganizationId(
+    userId: string,
+    organizationId: string,
+    readFromPrimary = false,
+  ): Promise<AccountDeletionRequest | undefined> {
+    const database = readFromPrimary ? dbWrite : dbRead;
+    const [request] = await database
+      .select()
+      .from(accountDeletionRequests)
+      .where(
+        and(
+          eq(accountDeletionRequests.user_id, userId),
+          eq(accountDeletionRequests.organization_id, organizationId),
+          notInArray(accountDeletionRequests.status, [...TERMINAL_REQUEST_STATUSES]),
+        ),
+      )
+      .limit(1);
+    return request;
+  }
+
+  /** Reserves the recovery package without fencing local or provider authority. */
   async reservePersonalAccountDeletion(
     input: ReservePersonalAccountDeletionInput,
   ): Promise<ReservePersonalAccountDeletionResult> {
@@ -135,6 +177,7 @@ export class AccountDeletionRequestsRepository {
         .where(
           and(
             eq(accountDeletionRequests.user_id, input.userId),
+            eq(accountDeletionRequests.organization_id, input.organizationId),
             notInArray(accountDeletionRequests.status, [...TERMINAL_REQUEST_STATUSES]),
           ),
         )
@@ -145,7 +188,44 @@ export class AccountDeletionRequestsRepository {
         // them on a concurrent replay can invalidate credentials already
         // returned to the winner and can orphan an export encrypted to the
         // original recovery credential.
-        return { outcome: "existing", request: existing };
+        if (existing.admission_token_hash === input.admissionTokenHash) {
+          return { outcome: "replayed", request: existing };
+        }
+        if (existing.status !== "requested") {
+          return { outcome: "existing", request: existing };
+        }
+
+        // A pre-fence package may be replaced by the same recently
+        // authenticated account after browser eviction. The receipt identity,
+        // provider idempotency keys, and provider-free state remain unchanged;
+        // the superseded bearer hashes can no longer activate it.
+        const [replaced] = await tx
+          .update(accountDeletionRequests)
+          .set({
+            status_token_hash: input.statusTokenHash,
+            status_token_expires_at: input.statusTokenExpiresAt,
+            recovery_token_hash: input.recoveryTokenHash,
+            recovery_token_expires_at: input.recoveryTokenExpiresAt,
+            admission_token_hash: input.admissionTokenHash,
+            admission_token_expires_at: input.admissionTokenExpiresAt,
+            requested_at: input.now,
+            recovery_expires_at: input.recoveryExpiresAt,
+            execute_after: input.recoveryExpiresAt,
+            updated_at: input.now,
+          })
+          .where(eq(accountDeletionRequests.id, existing.id))
+          .returning();
+        if (!replaced) {
+          throw new ElizaError("Account deletion reservation replacement was not committed", {
+            code: "ACCOUNT_DELETION_RESERVATION_REPLACEMENT_MISSING",
+            severity: "fatal",
+          });
+        }
+        await tx
+          .update(accountDeletionExports)
+          .set({ expires_at: input.recoveryExpiresAt, updated_at: input.now })
+          .where(eq(accountDeletionExports.request_id, existing.id));
+        return { outcome: "reserved", request: replaced };
       }
 
       if (!current || !current.is_active || current.deleted_at) {
@@ -170,7 +250,7 @@ export class AccountDeletionRequestsRepository {
           organization_id: input.organizationId,
           steward_user_id: input.stewardUserId,
           operation_kind: "personal_account_deletion",
-          status: "reserved",
+          status: "requested",
           lifecycle_revision:
             Math.max(current.account_lifecycle_revision, organization.account_lifecycle_revision) +
             1,
@@ -178,6 +258,8 @@ export class AccountDeletionRequestsRepository {
           status_token_expires_at: input.statusTokenExpiresAt,
           recovery_token_hash: input.recoveryTokenHash,
           recovery_token_expires_at: input.recoveryTokenExpiresAt,
+          admission_token_hash: input.admissionTokenHash,
+          admission_token_expires_at: input.admissionTokenExpiresAt,
           request_digest: input.requestDigest,
           restore_auto_top_up_enabled: organization.auto_top_up_enabled ?? false,
           restore_pay_as_you_go_from_earnings: organization.pay_as_you_go_from_earnings,
@@ -187,51 +269,21 @@ export class AccountDeletionRequestsRepository {
           updated_at: input.now,
         })
         .returning();
-      if (!request) throw new Error("Account deletion receipt was not created");
-
-      await tx
-        .update(users)
-        .set({
-          account_lifecycle_state: "deletion_recovery",
-          account_lifecycle_revision: request.lifecycle_revision,
-          account_deletion_request_id: request.id,
-          auth_fenced_at: input.now,
-          is_active: false,
-          updated_at: input.now,
-        })
-        .where(eq(users.id, input.userId));
-      await tx
-        .update(organizations)
-        .set({
-          account_lifecycle_state: "deletion_recovery",
-          account_lifecycle_revision: request.lifecycle_revision,
-          account_deletion_request_id: request.id,
-          paid_work_fenced_at: input.now,
-          auto_top_up_enabled: false,
-          pay_as_you_go_from_earnings: false,
-          is_active: false,
-          updated_at: input.now,
-        })
-        .where(eq(organizations.id, input.organizationId));
-      await tx
-        .update(apiKeys)
-        .set({ is_active: false, updated_at: input.now })
-        .where(
-          and(eq(apiKeys.user_id, input.userId), eq(apiKeys.organization_id, input.organizationId)),
-        );
-      await tx
-        .update(userSessions)
-        .set({ ended_at: input.now, updated_at: input.now })
-        .where(and(eq(userSessions.user_id, input.userId), isNull(userSessions.ended_at)));
+      if (!request) {
+        throw new ElizaError("Account deletion receipt was not created", {
+          code: "ACCOUNT_DELETION_RESERVATION_MISSING",
+          severity: "fatal",
+        });
+      }
 
       await tx.insert(accountDeletionPhaseReceipts).values(
         input.phases.map((phase) => ({
           request_id: request.id,
           phase: phase.phase,
           phase_order: phase.phaseOrder,
-          status: phase.completed ? "completed" : "pending",
+          status: "pending",
           idempotency_key_digest: phase.idempotencyKeyDigest,
-          completed_at: phase.completed ? input.now : null,
+          completed_at: null,
           created_at: input.now,
           updated_at: input.now,
         })),
@@ -245,6 +297,127 @@ export class AccountDeletionRequestsRepository {
       });
 
       return { outcome: "reserved", request };
+    });
+  }
+
+  /**
+   * Publishes all immediate local fences only after the browser proves it
+   * retained the recovery package. Replays observe the same authority revision
+   * and cannot revoke a second session/key epoch.
+   */
+  async activateReservedPersonalAccountDeletion(input: {
+    recoveryTokenHash: string;
+    now: Date;
+  }): Promise<ActivateReservedAccountDeletionResult> {
+    const [observed] = await dbWrite
+      .select()
+      .from(accountDeletionRequests)
+      .where(eq(accountDeletionRequests.recovery_token_hash, input.recoveryTokenHash))
+      .limit(1);
+    if (!observed) return { outcome: "invalid_credential" };
+    if (observed.status !== "requested") {
+      return { outcome: "already_activated", request: observed };
+    }
+    if (!observed.user_id || !observed.organization_id) {
+      return { outcome: "account_unavailable" };
+    }
+
+    return await dbWrite.transaction(async (tx) => {
+      const [organization] = await tx
+        .select()
+        .from(organizations)
+        .where(eq(organizations.id, observed.organization_id!))
+        .for("update")
+        .limit(1);
+      const members = await tx
+        .select()
+        .from(users)
+        .where(eq(users.organization_id, observed.organization_id!))
+        .for("update");
+      const [request] = await tx
+        .select()
+        .from(accountDeletionRequests)
+        .where(eq(accountDeletionRequests.id, observed.id))
+        .for("update")
+        .limit(1);
+      if (!request || request.recovery_token_hash !== input.recoveryTokenHash) {
+        return { outcome: "invalid_credential" };
+      }
+      if (request.status !== "requested") {
+        return { outcome: "already_activated", request };
+      }
+      if (!request.recovery_token_expires_at || request.recovery_token_expires_at <= input.now) {
+        return { outcome: "invalid_credential" };
+      }
+      const current = members.find((member) => member.id === request.user_id);
+      if (!organization || !current || !current.is_active || current.deleted_at) {
+        return { outcome: "account_unavailable" };
+      }
+      const activeMembers = members.filter((member) => member.is_active && !member.deleted_at);
+      const activeOwners = activeMembers.filter((member) => member.role === "owner");
+      if (activeMembers.length !== 1) {
+        return { outcome: "transfer_required", activeOwnerCount: activeOwners.length };
+      }
+
+      await tx
+        .update(users)
+        .set({
+          account_lifecycle_state: "deletion_recovery",
+          account_lifecycle_revision: request.lifecycle_revision,
+          account_deletion_request_id: request.id,
+          auth_fenced_at: input.now,
+          is_active: false,
+          updated_at: input.now,
+        })
+        .where(eq(users.id, current.id));
+      await tx
+        .update(organizations)
+        .set({
+          account_lifecycle_state: "deletion_recovery",
+          account_lifecycle_revision: request.lifecycle_revision,
+          account_deletion_request_id: request.id,
+          paid_work_fenced_at: input.now,
+          auto_top_up_enabled: false,
+          pay_as_you_go_from_earnings: false,
+          is_active: false,
+          updated_at: input.now,
+        })
+        .where(eq(organizations.id, organization.id));
+      await tx
+        .update(apiKeys)
+        .set({ is_active: false, updated_at: input.now })
+        .where(and(eq(apiKeys.user_id, current.id), eq(apiKeys.organization_id, organization.id)));
+      await tx
+        .update(userSessions)
+        .set({ ended_at: input.now, updated_at: input.now })
+        .where(and(eq(userSessions.user_id, current.id), isNull(userSessions.ended_at)));
+      await tx
+        .update(accountDeletionPhaseReceipts)
+        .set({ status: "completed", completed_at: input.now, updated_at: input.now })
+        .where(
+          and(
+            eq(accountDeletionPhaseReceipts.request_id, request.id),
+            eq(accountDeletionPhaseReceipts.phase, "account_authority"),
+            eq(accountDeletionPhaseReceipts.status, "pending"),
+          ),
+        );
+      const [activated] = await tx
+        .update(accountDeletionRequests)
+        .set({ status: "reserved", updated_at: input.now })
+        .where(
+          and(
+            eq(accountDeletionRequests.id, request.id),
+            eq(accountDeletionRequests.status, "requested"),
+          ),
+        )
+        .returning();
+      if (!activated) {
+        throw new ElizaError("Account deletion activation was not committed", {
+          code: "ACCOUNT_DELETION_ACTIVATION_MISSING",
+          severity: "fatal",
+        });
+      }
+      return { outcome: "activated", request: activated };
     });
   }
 
@@ -479,6 +652,8 @@ export class AccountDeletionRequestsRepository {
           lifecycle_revision: lifecycleRevision,
           recovery_token_hash: null,
           recovery_token_expires_at: null,
+          admission_token_hash: null,
+          admission_token_expires_at: null,
           irreversible_at: input.now,
           last_error_code: null,
           failure_class: null,
@@ -487,8 +662,12 @@ export class AccountDeletionRequestsRepository {
         })
         .where(eq(accountDeletionRequests.id, request.id))
         .returning();
-      if (!activated)
-        throw new Error("Deletion receipt disappeared during irreversible activation");
+      if (!activated) {
+        throw new ElizaError("Deletion receipt disappeared during irreversible activation", {
+          code: "ACCOUNT_DELETION_IRREVERSIBLE_ACTIVATION_MISSING",
+          severity: "fatal",
+        });
+      }
       return { outcome: "activated", request: activated };
     });
   }
@@ -591,6 +770,8 @@ export class AccountDeletionRequestsRepository {
         status: "action_required",
         recovery_token_hash: null,
         recovery_token_expires_at: null,
+        admission_token_hash: null,
+        admission_token_expires_at: null,
         last_error_code: input.errorCode,
         failure_class: "operator_action_required",
         next_reconcile_at: null,
@@ -824,6 +1005,14 @@ export class AccountDeletionRequestsRepository {
         .sort();
       if (incomplete.length > 0) return { outcome: "phases_incomplete", phases: incomplete };
 
+      // Replacement attempts may contain provider locators, so they remain
+      // restrictive until the compute phase proves every ambiguous effect is
+      // reconciled. At terminal database erasure the bounded request receipt,
+      // not the tenant-linked attempt row, becomes the retained evidence.
+      await tx
+        .delete(agentSandboxReplacementAttempts)
+        .where(eq(agentSandboxReplacementAttempts.organization_id, organization.id));
+
       const deleted = await tx
         .delete(organizations)
         .where(eq(organizations.id, organization.id))
@@ -845,6 +1034,8 @@ export class AccountDeletionRequestsRepository {
           steward_user_id: null,
           recovery_token_hash: null,
           recovery_token_expires_at: null,
+          admission_token_hash: null,
+          admission_token_expires_at: null,
           restore_auto_top_up_enabled: null,
           restore_pay_as_you_go_from_earnings: null,
           lease_expires_at: null,
@@ -858,7 +1049,12 @@ export class AccountDeletionRequestsRepository {
         })
         .where(eq(accountDeletionRequests.id, request.id))
         .returning();
-      if (!completed) throw new Error("Deletion receipt disappeared during terminal completion");
+      if (!completed) {
+        throw new ElizaError("Deletion receipt disappeared during terminal completion", {
+          code: "ACCOUNT_DELETION_TERMINAL_COMPLETION_MISSING",
+          severity: "fatal",
+        });
+      }
       return { outcome: "completed", request: completed };
     });
   }
@@ -900,7 +1096,12 @@ export class AccountDeletionRequestsRepository {
         .set({ identity_deactivated_at: input.now, updated_at: input.now })
         .where(eq(accountDeletionRequests.id, input.requestId))
         .returning({ id: accountDeletionRequests.id });
-      if (!request) throw new Error("Deletion request disappeared after Steward deactivation");
+      if (!request) {
+        throw new ElizaError("Deletion request disappeared after Steward deactivation", {
+          code: "ACCOUNT_DELETION_STEWARD_DEACTIVATION_REQUEST_MISSING",
+          severity: "fatal",
+        });
+      }
       return true;
     });
   }
@@ -950,7 +1151,12 @@ export class AccountDeletionRequestsRepository {
           ),
         )
         .returning({ id: accountDeletionRequests.id });
-      if (!request) throw new Error("Canceled deletion receipt disappeared during reactivation");
+      if (!request) {
+        throw new ElizaError("Canceled deletion receipt disappeared during reactivation", {
+          code: "ACCOUNT_DELETION_STEWARD_REACTIVATION_REQUEST_MISSING",
+          severity: "fatal",
+        });
+      }
       return true;
     });
   }
@@ -1121,7 +1327,12 @@ export class AccountDeletionRequestsRepository {
         })
         .where(eq(accountDeletionExports.request_id, input.requestId))
         .returning({ id: accountDeletionExports.id });
-      if (!exportReceipt) throw new Error("Deletion export receipt disappeared during completion");
+      if (!exportReceipt) {
+        throw new ElizaError("Deletion export receipt disappeared during completion", {
+          code: "ACCOUNT_DELETION_EXPORT_COMPLETION_RECEIPT_MISSING",
+          severity: "fatal",
+        });
+      }
 
       const [request] = await tx
         .update(accountDeletionRequests)
@@ -1133,7 +1344,12 @@ export class AccountDeletionRequestsRepository {
           ),
         )
         .returning({ id: accountDeletionRequests.id });
-      if (!request) throw new Error("Deletion request cannot enter recovery after export");
+      if (!request) {
+        throw new ElizaError("Deletion request cannot enter recovery after export", {
+          code: "ACCOUNT_DELETION_EXPORT_RECOVERY_TRANSITION_MISSING",
+          severity: "fatal",
+        });
+      }
       return true;
     });
   }
@@ -1247,14 +1463,19 @@ export class AccountDeletionRequestsRepository {
         .set({
           status: "canceling",
           canceled_at: input.now,
-          recovery_token_hash: null,
-          recovery_token_expires_at: null,
+          admission_token_hash: null,
+          admission_token_expires_at: null,
           last_error_code: "STEWARD_REACTIVATION_PENDING",
           updated_at: input.now,
         })
         .where(eq(accountDeletionRequests.id, request.id))
         .returning();
-      if (!canceling) throw new Error("Deletion receipt disappeared during recovery cancellation");
+      if (!canceling) {
+        throw new ElizaError("Deletion receipt disappeared during recovery cancellation", {
+          code: "ACCOUNT_DELETION_CANCELLATION_RECEIPT_MISSING",
+          severity: "fatal",
+        });
+      }
       return {
         outcome: "canceling",
         request: canceling,
@@ -1343,6 +1564,10 @@ export class AccountDeletionRequestsRepository {
         .set({
           status: "canceled",
           lifecycle_revision: restoredRevision,
+          recovery_token_hash: null,
+          recovery_token_expires_at: null,
+          admission_token_hash: null,
+          admission_token_expires_at: null,
           identity_deactivated_at: null,
           last_error_code: null,
           failure_class: null,
@@ -1367,6 +1592,33 @@ export class AccountDeletionRequestsRepository {
       .where(eq(accountDeletionRequests.id, id))
       .limit(1);
     return request;
+  }
+
+  /** Primary-only lookup for response-loss recovery of the first receipt capabilities. */
+  async findByAdmissionTokenHash(
+    admissionTokenHash: string,
+    now = new Date(),
+  ): Promise<AccountDeletionStatusRecord | undefined> {
+    const [request] = await dbWrite
+      .select()
+      .from(accountDeletionRequests)
+      .where(
+        and(
+          eq(accountDeletionRequests.admission_token_hash, admissionTokenHash),
+          gt(accountDeletionRequests.admission_token_expires_at, now),
+          isNotNull(accountDeletionRequests.status_token_hash),
+          isNotNull(accountDeletionRequests.recovery_token_hash),
+          inArray(accountDeletionRequests.status, ["reserved", "recovery"]),
+        ),
+      )
+      .limit(1);
+    if (!request) return undefined;
+    const [exportReceipt] = await dbWrite
+      .select()
+      .from(accountDeletionExports)
+      .where(eq(accountDeletionExports.request_id, request.id))
+      .limit(1);
+    return { request, exportReceipt: exportReceipt ?? null };
   }
 
   /** Primary-only recovery capability lookup for export and undo authority. */
@@ -1530,7 +1782,12 @@ export class AccountDeletionRequestsRepository {
         })
         .where(eq(accountDeletionExports.request_id, input.requestId))
         .returning({ id: accountDeletionExports.id });
-      if (!exportReceipt) throw new Error("Deletion export receipt disappeared during revocation");
+      if (!exportReceipt) {
+        throw new ElizaError("Deletion export receipt disappeared during revocation", {
+          code: "ACCOUNT_DELETION_EXPORT_REVOCATION_RECEIPT_MISSING",
+          severity: "fatal",
+        });
+      }
       return true;
     });
   }
@@ -1567,12 +1824,22 @@ export class AccountDeletionRequestsRepository {
       .returning();
     if (created) return created;
 
-    if (!data.user_id) {
-      throw new Error("Account deletion request requires a user ID");
+    if (!data.user_id || !data.organization_id) {
+      throw new ElizaError("Account deletion request requires user and organization IDs", {
+        code: "ACCOUNT_DELETION_REQUEST_IDENTIFIERS_REQUIRED",
+        severity: "fatal",
+      });
     }
-    const existing = await this.findOpenByUserId(data.user_id, true);
+    const existing = await this.findOpenByUserAndOrganizationId(
+      data.user_id,
+      data.organization_id,
+      true,
+    );
     if (!existing) {
-      throw new Error("Account deletion request conflicted but no open request was found");
+      throw new ElizaError("Account deletion request conflicted but no open request was found", {
+        code: "ACCOUNT_DELETION_CONFLICT_RECEIPT_MISSING",
+        severity: "fatal",
+      });
     }
     return existing;
   }

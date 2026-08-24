@@ -16,6 +16,7 @@ import {
   collectHoverViolations,
 } from "./helpers/brand-color-scans";
 import {
+  BILLING_AUDIT_RESOURCE_EXPECTATIONS,
   installCloudApiStubs,
   seedStewardToken,
 } from "./helpers/cloud-audit-fixtures";
@@ -97,6 +98,8 @@ interface CloudAuditCase {
   route: string;
   /** Seed the persisted Steward token before boot (authed cloud pages). */
   auth: boolean;
+  /** Capture the complete scroll surface when this route has reviewable content below the fold. */
+  fullPageEvidence?: boolean;
   /**
    * Routes that always redirect on localhost (role-gated, environment-bound)
    * cannot be visually inspected in this harness. Instead of recording a
@@ -353,9 +356,10 @@ const CLOUD_AUDIT_CASES: CloudAuditCase[] = [
   },
   {
     slug: "account-deletion",
-    path: "/account-deletion",
+    path: "/account-deletion?requested=untrusted-audit-receipt",
     route: "account-deletion",
     auth: PUBLIC,
+    fullPageEvidence: true,
   },
   { slug: "bsc", path: "/bsc", route: "bsc", auth: PUBLIC },
   // api-explorer/
@@ -502,6 +506,15 @@ function renderManualReviewStub(findings: CloudPageFinding[]): string {
       `- **hover probe failures:** ${f.hoverFailures.length ? f.hoverFailures.join("; ") : "none"}`,
       `- **readable content chars:** ${f.readableChars}`,
       `- **screenshot quality issues:** ${f.qualityIssues.length ? f.qualityIssues.join("; ") : "none"}`,
+      "",
+    );
+  }
+  if (first.slug === "cloud-billing") {
+    lines.push(
+      "## Paired hover evidence",
+      "",
+      "- The Active compute card is read-only, so its rest/hover screenshots are a paired stability proof: hovering a resource must not change or hide server-owned billing values.",
+      "- The page-wide orange-button hover scan still runs independently before this component-focused pair is captured.",
       "",
     );
   }
@@ -706,6 +719,15 @@ test.describe("cloud-surfaces aesthetic audit (#10725/#11342)", () => {
         // splash cannot satisfy the readable-character gate and pass green.
         await openAppPath(page, auditCase.path);
 
+        const billingEvidenceTarget =
+          auditCase.slug === "cloud-billing"
+            ? page
+                .getByRole("heading", { name: "Active compute", exact: true })
+                .locator(
+                  "xpath=ancestor::div[contains(concat(' ', normalize-space(@class), ' '), ' bg-bg-elevated ')][1]",
+                )
+            : null;
+
         if (auditCase.slug === "cloud-agents") {
           // The loading skeleton has readable column labels, so the generic
           // paint gate cannot prove the canonical list DTO was accepted.
@@ -714,6 +736,35 @@ test.describe("cloud-surfaces aesthetic audit (#10725/#11342)", () => {
               visible: true,
             }),
           ).toBeVisible({ timeout: 10_000 });
+        }
+
+        if (auditCase.slug === "cloud-billing") {
+          // The generic readable-text gate also accepts BillingTab's error
+          // state. Prove every counterfactual resource value reached its own
+          // card and stayed paired with the correct server-owned field. A
+          // resourceType -> interval inference or next/estimated cursor swap
+          // therefore fails this gate even when all strings exist globally.
+          if (!billingEvidenceTarget) {
+            throw new Error("Active compute audit target was not initialized");
+          }
+          for (const resource of BILLING_AUDIT_RESOURCE_EXPECTATIONS) {
+            const resourceCard = billingEvidenceTarget.locator("li").filter({
+              has: page.getByText(resource.name, { exact: true }),
+            });
+            await expect(resourceCard).toHaveCount(1);
+            await expect(resourceCard).toBeVisible({ timeout: 10_000 });
+            await expect(
+              resourceCard.getByText(resource.identity, { exact: true }),
+            ).toBeVisible();
+
+            for (const field of resource.fields) {
+              const term = resourceCard.getByText(field.label, { exact: true });
+              await expect(term).toHaveCount(1);
+              await expect(
+                term.locator("xpath=following-sibling::dd[1]"),
+              ).toHaveText(field.value);
+            }
+          }
         }
 
         if (auditCase.slug === "get-started-success") {
@@ -776,7 +827,55 @@ test.describe("cloud-surfaces aesthetic audit (#10725/#11342)", () => {
         readableChars = await readPaintAfterNavigation(10);
 
         const restPath = path.join(shotDir, `${auditCase.slug}.png`);
-        let buffer = await page.screenshot({ path: restPath, fullPage: false });
+        const fullPage = auditCase.fullPageEvidence ?? false;
+        if (fullPage) {
+          const scrollRegion = page
+            .locator("[data-scroll-cert-scroller]")
+            .first();
+          await expect(scrollRegion).toHaveCount(1);
+          const scrollMetrics = await scrollRegion.evaluate((element) => ({
+            clientHeight: element.clientHeight,
+            scrollHeight: element.scrollHeight,
+          }));
+          if (scrollMetrics.scrollHeight > scrollMetrics.clientHeight) {
+            await scrollRegion.evaluate((element) => {
+              element.scrollTop = element.scrollHeight;
+            });
+            expect(
+              await scrollRegion.evaluate((element) => element.scrollTop),
+              `${auditCase.slug} owns a working vertical scroll region`,
+            ).toBeGreaterThan(0);
+            await scrollRegion.evaluate((element) => {
+              element.scrollTop = 0;
+            });
+          }
+          await page.setViewportSize({
+            width: vp.width,
+            height: Math.ceil(scrollMetrics.scrollHeight),
+          });
+          await page.waitForTimeout(100);
+        }
+        // Billing's server-authoritative resource fields sit below the initial
+        // viewport inside an app-owned scroll container. Capture the complete
+        // Active Compute card in both states instead of green-lighting a frame
+        // that only shows the unrelated credit form above it.
+        if (billingEvidenceTarget) {
+          const box = await billingEvidenceTarget.boundingBox();
+          if (box && box.height + 240 > vp.height) {
+            await page.setViewportSize({
+              width: vp.width,
+              height: Math.ceil(box.height) + 240,
+            });
+            await billingEvidenceTarget.evaluate((element) =>
+              element.scrollIntoView({ block: "start", inline: "nearest" }),
+            );
+          }
+        }
+        const captureEvidence = (targetPath: string) =>
+          billingEvidenceTarget
+            ? billingEvidenceTarget.screenshot({ path: targetPath })
+            : page.screenshot({ path: targetPath, fullPage });
+        let buffer = await captureEvidence(restPath);
         let quality = await analyzeScreenshot(buffer).catch(() => null);
         for (
           let attempt = 0;
@@ -784,7 +883,7 @@ test.describe("cloud-surfaces aesthetic audit (#10725/#11342)", () => {
           attempt += 1
         ) {
           await page.waitForTimeout(800);
-          buffer = await page.screenshot({ path: restPath, fullPage: false });
+          buffer = await captureEvidence(restPath);
           quality = await analyzeScreenshot(buffer).catch(() => null);
         }
         const qualityIssues = quality
@@ -792,6 +891,9 @@ test.describe("cloud-surfaces aesthetic audit (#10725/#11342)", () => {
           : [];
 
         const blueColors = await collectBlueColors(page).catch(() => []);
+        // This global scan remains the interactive hover gate for every
+        // visible orange action on the full page. Billing's component-focused
+        // screenshot pair below is additive; it does not replace this scan.
         const { violations: hoverViolations, hoverFailures } =
           await collectHoverViolations(page).catch((error: unknown) => ({
             violations: [],
@@ -800,21 +902,23 @@ test.describe("cloud-surfaces aesthetic audit (#10725/#11342)", () => {
             ],
           }));
 
-        // Primary-button hover screenshot (the #10725 hover-rule artifact):
-        // hover the first visible enabled button and capture the state.
-        const hoverTarget = page
-          .locator("button:visible, a[role='button']:visible")
-          .first();
+        // Primary-button hover screenshot (the #10725 hover-rule artifact).
+        // The read-only compute card has no action, so hover its first resource
+        // and capture the same complete card. Its rest/hover pair proves that
+        // pointer presence cannot mutate, hide, or reflow authoritative values;
+        // it is explicitly a stability artifact, not an interaction claim.
+        const hoverTarget = billingEvidenceTarget
+          ? billingEvidenceTarget.locator("li").first()
+          : page.locator("button:visible, a[role='button']:visible").first();
         if (await hoverTarget.isVisible().catch(() => false)) {
           const hovered = await hoverTarget
             .hover({ timeout: 2000 })
             .then(() => true)
             .catch(() => false);
           if (hovered) {
-            await page.screenshot({
-              path: path.join(shotDir, `${auditCase.slug}--hover.png`),
-              fullPage: false,
-            });
+            await captureEvidence(
+              path.join(shotDir, `${auditCase.slug}--hover.png`),
+            );
           }
         }
 

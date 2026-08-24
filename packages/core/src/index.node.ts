@@ -393,7 +393,11 @@ export * from "./services/setup-state";
 // TaskService is exported so hosts and tests can `instanceof`-check the
 // runtime-registered instance; a relative src import would create a second
 // class identity against the built package and always fail that check.
-export { TaskService } from "./services/task";
+export {
+	TaskService,
+	type TaskServiceClock,
+	type TaskServiceTimerHandle,
+} from "./services/task";
 export {
 	getTaskSchedulerAdapter,
 	markTaskSchedulerDirty,
@@ -493,6 +497,10 @@ export { formatError } from "./utils/format-error";
 export * from "./utils/html-raw-text";
 /** Single-lane local inference scheduling: interactive-over-background gate + device-class background budgets (#11914). */
 export * from "./utils/inference-priority-gate";
+export {
+	assertModelOutputComplete,
+	isModelOutputLimitFinishReason,
+} from "./utils/model-errors";
 // Export Node-specific utilities
 export * from "./utils/project-memory-scope";
 export * from "./utils/project-registry";

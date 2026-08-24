@@ -5,7 +5,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { and, eq, ne, or, sql } from "drizzle-orm";
+import { ElizaError } from "@elizaos/core";
+import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
 import { dbWrite } from "../../db/helpers";
 import {
   agentBackupGcOutbox,
@@ -17,6 +18,7 @@ import {
   agentBackupRestoreReceipts,
   agentVaultKeySeedReceipts,
 } from "../../db/schemas/agent-backup-restore-history";
+import { agentSandboxReplacementAttempts } from "../../db/schemas/agent-sandbox-replacement-attempts";
 import {
   agentBackupCatalogAuthorities,
   agentSandboxBackups,
@@ -38,10 +40,6 @@ import {
 import { orgStorageReadOperations } from "../../db/schemas/org-storage-reads";
 import { organizations } from "../../db/schemas/organizations";
 import { userVoices } from "../../db/schemas/user-voices";
-import {
-  type AgentBackupObjectStoreRegistry,
-  type AgentBackupStorageAuthority,
-} from "../storage/agent-backup-object-store";
 import type { RuntimeR2Bucket, RuntimeR2ObjectMetadata } from "../storage/r2-runtime-binding";
 import { getStripe } from "../stripe";
 import type {
@@ -91,7 +89,12 @@ async function listOrganizationObjectKeys(
   bucket: RuntimeR2Bucket,
   organizationId: string,
 ): Promise<string[]> {
-  if (!bucket.list) throw new Error("Account deletion object storage cannot be inspected");
+  if (!bucket.list) {
+    throw new ElizaError("Account deletion object storage cannot be inspected", {
+      code: "ACCOUNT_DELETION_OBJECT_INSPECTION_UNAVAILABLE",
+      severity: "fatal",
+    });
+  }
   const keys: string[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | undefined;
@@ -106,7 +109,10 @@ async function listOrganizationObjectKeys(
     truncated = page.truncated;
     if (!truncated) break;
     if (!page.cursor || seenCursors.has(page.cursor)) {
-      throw new Error("Account deletion object listing did not advance");
+      throw new ElizaError("Account deletion object listing did not advance", {
+        code: "ACCOUNT_DELETION_OBJECT_CURSOR_INVALID",
+        severity: "fatal",
+      });
     }
     seenCursors.add(page.cursor);
     cursor = page.cursor;
@@ -121,8 +127,30 @@ function isMissingStripeResource(error: unknown): boolean {
 }
 
 export interface AccountDeletionProviderAdapterDependencies {
-  backupRegistry?: AgentBackupObjectStoreRegistry;
+  backupAuthority?: AccountDeletionBackupAuthority;
+  backupDatabase?: AccountDeletionBackupDatabase;
+  computeDatabase?: AccountDeletionComputeDatabase;
   spoolAuthority?: AccountDeletionSpoolAuthority;
+}
+
+export interface AccountDeletionBackupAuthority {
+  inspectOrganizationBackups(input: { organizationId: string }): Promise<"absent" | "present">;
+  purgeOrganizationBackups(input: {
+    organizationId: string;
+    idempotencyKey: string;
+  }): Promise<void>;
+}
+
+export interface AccountDeletionBackupDatabase {
+  rowsRemain(organizationId: string): Promise<boolean>;
+  deleteGraph(organizationId: string): Promise<void>;
+}
+
+export interface AccountDeletionComputeDatabase {
+  inspectOrganization(organizationId: string): Promise<{
+    sandboxesRemain: boolean;
+    ambiguousReplacementAttemptsRemain: boolean;
+  }>;
 }
 
 export interface AccountDeletionSpoolAuthority {
@@ -196,62 +224,37 @@ async function backupRowsRemain(organizationId: string): Promise<boolean> {
   return backup !== undefined;
 }
 
-function storedAuthority(
-  object: typeof agentBackupObjects.$inferSelect,
-): AgentBackupStorageAuthority {
-  return {
-    provider: object.provider,
-    transport: object.transport,
-    endpointAlias: object.endpoint_alias,
-    endpointIdentityFingerprint: object.endpoint_identity_fingerprint,
-    bucket: object.bucket,
-    region: object.region,
-  };
-}
+const defaultBackupDatabase: AccountDeletionBackupDatabase = {
+  rowsRemain: backupRowsRemain,
+  deleteGraph: deleteBackupDatabaseGraph,
+};
 
-async function inspectBackupObjects(
-  context: AccountDeletionProviderContext,
-  registry: AgentBackupObjectStoreRegistry,
-): Promise<"absent" | "present"> {
-  const objects = await dbWrite
-    .select()
-    .from(agentBackupObjects)
-    .where(eq(agentBackupObjects.organization_id, context.organizationId));
-  if (objects.length === 0) {
-    if (await backupRowsRemain(context.organizationId)) {
-      await deleteBackupDatabaseGraph(context.organizationId);
-    }
-    return "absent";
-  }
-  let present = false;
-  for (const object of objects) {
-    const store = registry.forStoredObject(storedAuthority(object));
-    const observed = await store.head(object.object_key);
-    if (observed.status === "present") present = true;
-  }
-  if (!present) {
-    await deleteBackupDatabaseGraph(context.organizationId);
-    return "absent";
-  }
-  return "present";
-}
-
-async function executeBackupObjectDeletion(
-  context: AccountDeletionProviderContext,
-  registry: AgentBackupObjectStoreRegistry,
-): Promise<void> {
-  const objects = await dbWrite
-    .select()
-    .from(agentBackupObjects)
-    .where(eq(agentBackupObjects.organization_id, context.organizationId));
-  for (const object of objects) {
-    const store = registry.forStoredObject(storedAuthority(object));
-    const observed = await store.head(object.object_key);
-    if (observed.status === "present") {
-      await store.delete({ key: object.object_key, locator: observed.locator });
-    }
-  }
-}
+const defaultComputeDatabase: AccountDeletionComputeDatabase = {
+  async inspectOrganization(organizationId) {
+    const [sandbox] = await dbWrite
+      .select({ id: agentSandboxes.id })
+      .from(agentSandboxes)
+      .where(eq(agentSandboxes.organization_id, organizationId))
+      .limit(1);
+    const [ambiguousReplacementAttempt] = await dbWrite
+      .select({ id: agentSandboxReplacementAttempts.id })
+      .from(agentSandboxReplacementAttempts)
+      .where(
+        and(
+          eq(agentSandboxReplacementAttempts.organization_id, organizationId),
+          inArray(agentSandboxReplacementAttempts.state, [
+            "in_flight_unresolved",
+            "provider_succeeded",
+          ]),
+        ),
+      )
+      .limit(1);
+    return {
+      sandboxesRemain: sandbox !== undefined,
+      ambiguousReplacementAttemptsRemain: ambiguousReplacementAttempt !== undefined,
+    };
+  },
+};
 
 async function clearVaultKeyGraph(organizationId: string): Promise<void> {
   await dbWrite.transaction(async (tx) => {
@@ -419,24 +422,36 @@ export function createAccountDeletionProviderAdapters(
     },
     secondary_backups: {
       async inspect(context) {
-        if (!(await backupRowsRemain(context.organizationId))) {
-          return complete(context, "secondary_backups");
-        }
-        if (!dependencies.backupRegistry) {
+        if (!dependencies.backupAuthority) {
           return {
             state: "action_required",
             errorCode: "BACKUP_STORAGE_AUTHORITY_UNAVAILABLE",
           };
         }
-        return (await inspectBackupObjects(context, dependencies.backupRegistry)) === "absent"
-          ? complete(context, "secondary_backups")
-          : { state: "needs_execution" };
-      },
-      async execute(context) {
-        if (!dependencies.backupRegistry) {
-          throw new Error("Backup storage authority is not configured");
+        if (
+          (await dependencies.backupAuthority.inspectOrganizationBackups({
+            organizationId: context.organizationId,
+          })) === "present"
+        ) {
+          return { state: "needs_execution" };
         }
-        await executeBackupObjectDeletion(context, dependencies.backupRegistry);
+        const backupDatabase = dependencies.backupDatabase ?? defaultBackupDatabase;
+        if (await backupDatabase.rowsRemain(context.organizationId)) {
+          await backupDatabase.deleteGraph(context.organizationId);
+        }
+        return complete(context, "secondary_backups");
+      },
+      async execute(context, idempotencyKey) {
+        if (!dependencies.backupAuthority) {
+          throw new ElizaError("Backup storage authority is not configured", {
+            code: "ACCOUNT_DELETION_BACKUP_AUTHORITY_UNAVAILABLE",
+            severity: "fatal",
+          });
+        }
+        await dependencies.backupAuthority.purgeOrganizationBackups({
+          organizationId: context.organizationId,
+          idempotencyKey,
+        });
       },
     },
     spools: {
@@ -455,7 +470,10 @@ export function createAccountDeletionProviderAdapters(
       },
       async execute(context, idempotencyKey) {
         if (!dependencies.spoolAuthority) {
-          throw new Error("Backup spool authority is not configured");
+          throw new ElizaError("Backup spool authority is not configured", {
+            code: "ACCOUNT_DELETION_SPOOL_AUTHORITY_UNAVAILABLE",
+            severity: "fatal",
+          });
         }
         await dependencies.spoolAuthority.purgeOrganizationSpools({
           organizationId: context.organizationId,
@@ -465,12 +483,18 @@ export function createAccountDeletionProviderAdapters(
     },
     compute_containers: {
       async inspect(context) {
-        const [row] = await dbWrite
-          .select({ id: agentSandboxes.id })
-          .from(agentSandboxes)
-          .where(eq(agentSandboxes.organization_id, context.organizationId))
-          .limit(1);
-        return row ? { state: "needs_execution" } : complete(context, "compute_containers");
+        const observed = await (
+          dependencies.computeDatabase ?? defaultComputeDatabase
+        ).inspectOrganization(context.organizationId);
+        if (observed.ambiguousReplacementAttemptsRemain) {
+          return {
+            state: "action_required",
+            errorCode: "COMPUTE_REPLACEMENT_RECONCILIATION_REQUIRED",
+          };
+        }
+        return observed.sandboxesRemain
+          ? { state: "needs_execution" }
+          : complete(context, "compute_containers");
       },
       async execute(context) {
         const rows = await dbWrite
@@ -482,7 +506,10 @@ export function createAccountDeletionProviderAdapters(
             authorization: "account_deletion",
           });
           if (!deleted.success && deleted.error !== "Agent not found") {
-            throw new Error(deleted.error || "Agent provider deletion failed");
+            throw new ElizaError(deleted.error || "Agent provider deletion failed", {
+              code: "ACCOUNT_DELETION_AGENT_PROVIDER_DELETE_FAILED",
+              severity: "ephemeral",
+            });
           }
         }
       },
@@ -507,7 +534,12 @@ export function createAccountDeletionProviderAdapters(
             deleteGitHubRepo: true,
             requireContainerTeardownCompletion: true,
           });
-          if (!deleted.success) throw new Error(deleted.errors.join("; "));
+          if (!deleted.success) {
+            throw new ElizaError(deleted.errors.join("; "), {
+              code: "ACCOUNT_DELETION_APP_PROVIDER_DELETE_FAILED",
+              severity: "ephemeral",
+            });
+          }
         }
       },
     },
@@ -642,7 +674,10 @@ export function createAccountDeletionProviderAdapters(
     adapter.inspect = async (context) => {
       const inspection = await inspect(context);
       if (inspection.state === "complete" && !DIGEST_PATTERN.test(inspection.receiptDigest)) {
-        throw new Error("Account deletion provider adapter emitted an invalid digest");
+        throw new ElizaError("Account deletion provider adapter emitted an invalid digest", {
+          code: "ACCOUNT_DELETION_PROVIDER_ADAPTER_DIGEST_INVALID",
+          severity: "fatal",
+        });
       }
       return inspection;
     };

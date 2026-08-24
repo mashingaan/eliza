@@ -13,9 +13,9 @@ This catalog is generated from `packages/prompts/specs/**` by `bun run --cwd pac
 - **Canonical actions:** 24
 - **Core actions:** 14
 - **Plugin overlay actions:** 10
-- **Canonical providers:** 23
-- **Core providers:** 23
-- **Registered runtime actions:** 172
+- **Canonical providers:** 22
+- **Core providers:** 22
+- **Registered runtime actions:** 180
 
 ## Actions
 
@@ -46,7 +46,7 @@ Primary action for addressed messaging surfaces: DMs, group chats, channels, roo
 | Parameter | Required | Type | Description |
 | --- | --- | --- | --- |
 | `action` | no | string | Message action: send, read_channel, read_with_contact, search, list_channels, list_servers, react, edit, delete, pin, join, leave, get_user, triage, list_inbox, search_inbox, draft_reply, draft_followup, respond, send_draft, schedule_draft_send, or manage. |
-| `source` | no | string | Connector or inbox source such as discord, slack, signal, whatsapp, telegram, x, imessage, matrix, line, google-chat, feishu, instagram, wechat, gmail, calendly, or browser_bridge. |
+| `source` | no | string | Connector or inbox source such as discord, slack, whatsapp, telegram, x, imessage, matrix, line, google-chat, feishu, instagram, wechat, gmail, calendly, or browser_bridge. |
 | `accountId` | no | string | Optional connector account id for multi-account message connectors. |
 | `sources` | no | array | Optional inbox sources for action=triage, list_inbox, or search_inbox. |
 | `target` | no | string | Loose target reference: user, handle, channel, room, group, server, contact, phone, email, or platform-specific ID. |
@@ -342,6 +342,7 @@ list. Regenerate this document after changing the registered action surface.
 - `AGENT_SWITCH` — `plugins/plugin-app-control/src/actions/agent-switch.ts`
 - `ALARM` — `plugins/plugin-native-macosalarm/src/actions.ts`
 - `APP` — `plugins/plugin-app-control/src/actions/app.ts`
+- `ASSERT_MEETING_MOCK_LEDGER` — `plugins/plugin-meetings/src/test-support.ts`
 - `ATTACH_TO_CHAT` — `packages/agent/src/actions/knowledge.ts`
 - `ATTACHMENT` — `packages/core/src/features/working-memory/readAttachmentAction.ts`
 - `AWAIT_CHILD_AGENT_DECISION` — `packages/core/src/features/sub-agent-credentials/actions/await-child-agent-decision.ts`
@@ -384,8 +385,10 @@ list. Regenerate this document after changing the registered action surface.
 - `DEPLOY_FRONTEND` — `plugins/plugin-cloud-apps/src/actions/deploy-frontend.ts`
 - `DISABLE_AUTONOMOUS_MODE` — `packages/core/src/features/autonomy/action.ts`
 - `DOCUMENT` — `packages/core/src/features/documents/actions.ts`
+- `DOORDASH` — `plugins/plugin-doordash/src/action.ts`
 - `DRAFT_PRESS_RELEASE` — `plugins/plugin-cloud-apps/src/actions/press-releases.ts`
 - `DUPLICATE_AD_CAMPAIGN` — `plugins/plugin-cloud-apps/src/actions/ad-campaigns.ts`
+- `EDIT` — `plugins/plugin-coding-tools/src/actions/direct-file-actions.ts`
 - `ENABLE_AUTONOMOUS_MODE` — `packages/core/src/features/autonomy/action.ts`
 - `ENTITY` — `plugins/plugin-personal-assistant/src/actions/entity.ts`
 - `ESCALATE` — `packages/core/src/features/autonomy/action.ts`
@@ -402,6 +405,7 @@ list. Regenerate this document after changing the registered action surface.
 - `GET_APP_EARNINGS` — `plugins/plugin-cloud-apps/src/actions/get-app-earnings.ts`
 - `GET_COMPANION_STATUS` — `plugins/plugin-companion/src/actions.ts`
 - `GET_MEETING_TRANSCRIPT` — `plugins/plugin-meetings/src/actions/get-meeting-transcript.ts`
+- `GET_OMARCHY_STATUS` — `plugins/plugin-omarchy/src/actions/desktop.ts`
 - `GITHUB` — `plugins/plugin-github/src/actions/github.ts`
 - `HOUSEHOLD_COORDINATION` — `plugins/plugin-personal-assistant/src/actions/household-coordination.ts`
 - `HOUSEHOLD_FOOD` — `plugins/plugin-personal-assistant/src/lifeops/food/action.ts`
@@ -456,6 +460,7 @@ list. Regenerate this document after changing the registered action surface.
 - `PRIORITIZE` — `plugins/plugin-personal-assistant/src/actions/prioritize.ts`
 - `PROBE_PLUGIN_CONFIG_REQUIREMENTS` — `packages/core/src/features/plugin-config/actions/probe-plugin-config-requirements.ts`
 - `PROXY_STATUS` — `plugins/plugin-anthropic-proxy/src/actions/proxy-status.action.ts`
+- `READ` — `plugins/plugin-coding-tools/src/actions/direct-file-actions.ts`
 - `REDACT_TRANSCRIPT` — `plugins/plugin-local-inference/src/actions/transcript-permissioning.ts`
 - `REGENERATE_APP_API_KEY` — `plugins/plugin-cloud-apps/src/actions/regenerate-app-api-key.ts`
 - `REMINDERS` — `plugins/plugin-scheduling/src/shared-reminders.ts`
@@ -482,6 +487,8 @@ list. Regenerate this document after changing the registered action surface.
 - `SETTINGS` — `packages/agent/src/actions/settings-actions.ts`, `plugins/plugin-app-control/src/actions/settings.ts`
 - `SHARE_TRANSCRIPT` — `plugins/plugin-local-inference/src/actions/transcript-permissioning.ts`
 - `SHELL` — `plugins/plugin-coding-tools/src/actions/bash.ts`
+- `SHOW_ELIZA_OMARCHY_PILL` — `plugins/plugin-omarchy/src/actions/desktop.ts`
+- `SHOW_OMARCHY_NOTIFICATION` — `plugins/plugin-omarchy/src/actions/desktop.ts`
 - `SKILL` — `plugins/plugin-agent-skills/src/actions/skill.ts`
 - `SPOTIFY` — `plugins/plugin-spotify/src/actions.ts`
 - `START_TRANSCRIPTION` — `plugins/plugin-local-inference/src/actions/transcription-control.ts`
@@ -510,6 +517,7 @@ list. Regenerate this document after changing the registered action surface.
 - `WITHDRAW_APP_EARNINGS` — `plugins/plugin-cloud-apps/src/actions/withdraw-app-earnings.ts`
 - `WORK_THREAD` — `plugins/plugin-personal-assistant/src/actions/work-thread.ts`
 - `WORKTREE` — `plugins/plugin-coding-tools/src/actions/worktree.ts`
+- `WRITE` — `plugins/plugin-coding-tools/src/actions/direct-file-actions.ts`
 
 ## Providers
 
@@ -651,13 +659,6 @@ Provides information about the current world context including settings and memb
 Persistent facts and preferences about the user learned and remembered across conversations
 
 - **Position:** 50
-- **Dynamic:** no
-
-### SUMMARIZED_CONTEXT
-
-Provides summarized context from previous conversations for optimized context usage
-
-- **Position:** 96
 - **Dynamic:** no
 
 ### AGENT_SETTINGS

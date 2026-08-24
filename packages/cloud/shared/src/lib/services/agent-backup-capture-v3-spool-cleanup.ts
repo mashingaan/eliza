@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ElizaError } from "@elizaos/core";
 import z from "zod";
 import {
   type AuthorizeAgentBackupProtectedSpoolCleanupInput,
@@ -75,6 +76,7 @@ const TerminalIntentSchema = z.strictObject({
   lifecycleRevision: z.string().regex(/^(?:0|[1-9][0-9]{0,19})$/),
   requestSha256: z.string().regex(SHA256_PATTERN),
   authoritySha256: z.string().regex(SHA256_PATTERN),
+  runtimePrincipalSha256: z.string().regex(SHA256_PATTERN),
   terminalErrorCode: z
     .string()
     .min(1)
@@ -104,6 +106,7 @@ export interface AgentBackupCaptureV3TerminalSpoolCleanupAuthority {
   lifecycleRevision: string;
   requestSha256: string;
   authoritySha256: string;
+  runtimePrincipalSha256: string;
 }
 
 export interface AgentBackupCaptureV3SpoolCleanupDependencies {
@@ -130,6 +133,7 @@ export interface AgentBackupCaptureV3SpoolCleanupDependencies {
       executionToken: string;
       requestSha256: string;
       authoritySha256: string;
+      runtimePrincipalSha256?: string;
     },
   ): Promise<AgentBackupCaptureV3Spool | undefined>;
   now(): number;
@@ -168,7 +172,7 @@ export interface AgentBackupCaptureV3SpoolCleanupJanitor {
     authority: Readonly<AgentBackupCaptureV3TerminalSpoolCleanupAuthority>;
     terminalErrorCode: string;
   }): Promise<"pending">;
-  runCycle(): Promise<AgentBackupCaptureV3SpoolCleanupSummary>;
+  runCycle(signal?: AbortSignal): Promise<AgentBackupCaptureV3SpoolCleanupSummary>;
 }
 
 function batchSize(value: number | undefined): number {
@@ -222,6 +226,7 @@ function terminalCleanupAuthority(
     lifecycleRevision: evidence.lifecycleRevision,
     requestSha256: evidence.requestSha256,
     authoritySha256: evidence.authoritySha256,
+    runtimePrincipalSha256: evidence.runtimePrincipalSha256,
   };
 }
 
@@ -447,6 +452,7 @@ function sameTerminalIntent(
     left.lifecycleRevision === right.lifecycleRevision &&
     left.requestSha256 === right.requestSha256 &&
     left.authoritySha256 === right.authoritySha256 &&
+    left.runtimePrincipalSha256 === right.runtimePrincipalSha256 &&
     left.terminalErrorCode === right.terminalErrorCode
   );
 }
@@ -526,6 +532,7 @@ function sameTerminalCandidate(
     left.lifecycleRevision === right.lifecycleRevision &&
     left.requestSha256 === right.requestSha256 &&
     left.authoritySha256 === right.authoritySha256 &&
+    left.runtimePrincipalSha256 === right.runtimePrincipalSha256 &&
     left.terminalErrorCode === right.terminalErrorCode
   );
 }
@@ -692,6 +699,190 @@ async function removeIntent(outbox: string, operationId: string): Promise<void> 
   await fsyncDirectory(outbox);
 }
 
+type AccountDeletionSpoolAuthorityArtifact = {
+  directory: string;
+  operationId: string;
+  organizationId: string;
+};
+
+function accountDeletionSpoolArtifactError(
+  code: string,
+  message: string,
+  cause?: unknown,
+): never {
+  throw new ElizaError(message, { code, cause, severity: "fatal" });
+}
+
+async function existingAuthorityOutbox(
+  stateDirectory: string,
+  directoryName: string,
+): Promise<string | null> {
+  const resolvedState = path.resolve(stateDirectory);
+  if (!path.isAbsolute(stateDirectory) || resolvedState !== stateDirectory) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_STATE_DIRECTORY_INVALID",
+      "Account deletion spool authority requires an exact persistent StateDirectory",
+    );
+  }
+  const outbox = path.join(resolvedState, directoryName);
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.lstat(outbox);
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return null;
+    // error-policy:J2 preserve the filesystem failure behind a static authority error.
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_OUTBOX_UNAVAILABLE",
+      "Account deletion spool authority could not inspect an outbox",
+      cause,
+    );
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_OUTBOX_UNSAFE",
+      "Account deletion spool authority encountered an unsafe outbox",
+    );
+  }
+  const real = await fs.promises.realpath(outbox);
+  if (real !== outbox || path.dirname(real) !== resolvedState) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_OUTBOX_UNSAFE",
+      "Account deletion spool authority outbox escaped its StateDirectory",
+    );
+  }
+  const entries = await fs.promises.readdir(outbox, { withFileTypes: true });
+  if (entries.some((entry) => OWNED_TEMPORARY_PATTERN.test(entry.name))) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_OUTBOX_BUSY",
+      "Account deletion spool authority found an in-flight outbox write",
+    );
+  }
+  return outbox;
+}
+
+async function requireAccountDeletionSpoolStateDirectory(stateDirectory: string): Promise<void> {
+  const resolvedState = path.resolve(stateDirectory);
+  if (!path.isAbsolute(stateDirectory) || resolvedState !== stateDirectory) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_STATE_DIRECTORY_INVALID",
+      "Account deletion spool authority requires an exact persistent StateDirectory",
+    );
+  }
+  let stat: fs.Stats;
+  try {
+    stat = await fs.promises.lstat(resolvedState);
+  } catch (cause) {
+    // error-policy:J2 a missing or unmounted authority root cannot prove absence.
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_STATE_DIRECTORY_UNAVAILABLE",
+      "Account deletion spool authority StateDirectory is unavailable",
+      cause,
+    );
+  }
+  const real = await fs.promises.realpath(resolvedState);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || real !== resolvedState) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_STATE_DIRECTORY_UNSAFE",
+      "Account deletion spool authority StateDirectory is not an exact directory",
+    );
+  }
+  const realTemporaryDirectory = await fs.promises.realpath(os.tmpdir());
+  const relativeToTemporary = path.relative(realTemporaryDirectory, resolvedState);
+  if (
+    relativeToTemporary === "" ||
+    (!relativeToTemporary.startsWith("..") && !path.isAbsolute(relativeToTemporary))
+  ) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_STATE_DIRECTORY_UNSAFE",
+      "Account deletion spool authority StateDirectory must be persistent",
+    );
+  }
+}
+
+async function listAccountDeletionSpoolAuthorityArtifacts(
+  stateDirectory: string,
+): Promise<readonly AccountDeletionSpoolAuthorityArtifact[]> {
+  await requireAccountDeletionSpoolStateDirectory(stateDirectory);
+  const artifacts: AccountDeletionSpoolAuthorityArtifact[] = [];
+  const protectedOutbox = await existingAuthorityOutbox(stateDirectory, OUTBOX_DIRECTORY);
+  if (protectedOutbox) {
+    for (const intent of await listIntents(protectedOutbox, Number.MAX_SAFE_INTEGER)) {
+      artifacts.push({
+        directory: protectedOutbox,
+        operationId: intent.operationId,
+        organizationId: intent.organizationId,
+      });
+    }
+  }
+  const terminalOutbox = await existingAuthorityOutbox(
+    stateDirectory,
+    TERMINAL_OUTBOX_DIRECTORY,
+  );
+  if (terminalOutbox) {
+    for (const intent of await listTerminalIntents(terminalOutbox, Number.MAX_SAFE_INTEGER)) {
+      artifacts.push({
+        directory: terminalOutbox,
+        operationId: intent.operationId,
+        organizationId: intent.organizationId,
+      });
+    }
+  }
+  const terminalCandidates = await existingAuthorityOutbox(
+    stateDirectory,
+    TERMINAL_CANDIDATE_DIRECTORY,
+  );
+  if (terminalCandidates) {
+    for (const intent of await listTerminalCandidates(
+      terminalCandidates,
+      Number.MAX_SAFE_INTEGER,
+    )) {
+      artifacts.push({
+        directory: terminalCandidates,
+        operationId: intent.operationId,
+        organizationId: intent.organizationId,
+      });
+    }
+  }
+  return Object.freeze(artifacts);
+}
+
+/** Inspect durable janitor authority files without creating a missing outbox. */
+export async function inspectAgentBackupOrganizationSpoolAuthorityArtifacts(input: {
+  stateDirectory: string;
+  organizationId: string;
+}): Promise<"absent" | "present"> {
+  if (!UUID_PATTERN.test(input.organizationId)) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_ORGANIZATION_INVALID",
+      "Account deletion spool authority requires a canonical organization identity",
+    );
+  }
+  return (await listAccountDeletionSpoolAuthorityArtifacts(input.stateDirectory)).some(
+    (artifact) => artifact.organizationId === input.organizationId,
+  )
+    ? "present"
+    : "absent";
+}
+
+/** Remove only janitor authority files already bound to the exact organization. */
+export async function purgeAgentBackupOrganizationSpoolAuthorityArtifacts(input: {
+  stateDirectory: string;
+  organizationId: string;
+}): Promise<void> {
+  if (!UUID_PATTERN.test(input.organizationId)) {
+    accountDeletionSpoolArtifactError(
+      "ACCOUNT_DELETION_SPOOL_ORGANIZATION_INVALID",
+      "Account deletion spool authority requires a canonical organization identity",
+    );
+  }
+  const artifacts = await listAccountDeletionSpoolAuthorityArtifacts(input.stateDirectory);
+  for (const artifact of artifacts) {
+    if (artifact.organizationId === input.organizationId) {
+      await removeIntent(artifact.directory, artifact.operationId);
+    }
+  }
+}
+
 function canonicalAuthorizedAt(now: number): string {
   if (!Number.isSafeInteger(now) || now < 1)
     throw new Error("Backup spool cleanup clock is invalid");
@@ -731,6 +922,7 @@ function assertTerminalCleanupAuthorization(params: {
     lifecycleRevision: true,
     requestSha256: true,
     authoritySha256: true,
+    runtimePrincipalSha256: true,
     terminalErrorCode: true,
   }).parse({ ...authority, terminalErrorCode: params.terminalErrorCode });
 }
@@ -745,18 +937,24 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
   const authorizeAndPersist = async (
     outbox: string,
     authority: Readonly<AgentBackupCaptureV3SpoolAuthority>,
+    signal?: AbortSignal,
   ): Promise<void> => {
+    signal?.throwIfAborted();
     const authorized = await dependencies.authorize(authorizationInput(authority));
+    signal?.throwIfAborted();
     const rederived = await dependencies.deriveAuthority(authorized);
+    signal?.throwIfAborted();
     if (!sameAuthority(authority, rederived)) {
       throw new Error("Protected cleanup repository returned different spool authority");
     }
+    signal?.throwIfAborted();
     await persistIntent({
       outbox,
       authority,
       authorizedAt: canonicalAuthorizedAt(dependencies.now()),
       nonce: dependencies.executionToken(),
     });
+    signal?.throwIfAborted();
   };
 
   return {
@@ -783,6 +981,7 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
         lifecycleRevision: true,
         requestSha256: true,
         authoritySha256: true,
+        runtimePrincipalSha256: true,
         terminalErrorCode: true,
       }).parse({ ...input.authority, terminalErrorCode: input.terminalErrorCode });
       const durable = await dependencies.listDurableOperations(config.spool);
@@ -793,6 +992,7 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
         operation &&
         (operation.requestSha256 !== input.authority.requestSha256 ||
           operation.authoritySha256 !== input.authority.authoritySha256 ||
+          operation.runtimePrincipalSha256 !== input.authority.runtimePrincipalSha256 ||
           operation.recordCaptured)
       ) {
         throw new Error("Terminal spool cleanup candidate differs from durable capture state");
@@ -811,7 +1011,9 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
       return "pending";
     },
 
-    async runCycle() {
+    async runCycle(signal) {
+      const throwIfAborted = (): void => signal?.throwIfAborted();
+      throwIfAborted();
       const summary: AgentBackupCaptureV3SpoolCleanupSummary = {
         discovered: 0,
         authorized: 0,
@@ -820,50 +1022,65 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
         skippedUnprotected: 0,
         indeterminate: 0,
       };
+      throwIfAborted();
       const durable = await dependencies.listDurableOperations(config.spool);
+      throwIfAborted();
       const outbox = await ensureOutboxDirectory(config.spool.stateDirectory);
+      throwIfAborted();
       const terminalOutbox = await ensureOutboxDirectory(
         config.spool.stateDirectory,
         TERMINAL_OUTBOX_DIRECTORY,
       );
+      throwIfAborted();
       const terminalCandidateOutbox = await ensureOutboxDirectory(
         config.spool.stateDirectory,
         TERMINAL_CANDIDATE_DIRECTORY,
       );
+      throwIfAborted();
       summary.discovered = durable.length;
       const terminalCandidates = await listTerminalCandidates(terminalCandidateOutbox, limit);
+      throwIfAborted();
       for (const candidate of terminalCandidates) {
+        throwIfAborted();
         const operation = durable.find(
           (durableOperation) => durableOperation.operationId === candidate.operationId,
         );
         if (!operation) {
+          throwIfAborted();
           await removeIntent(terminalCandidateOutbox, candidate.operationId);
+          throwIfAborted();
           continue;
         }
         if (operation.recordCaptured) {
           // A confirmed local handoff is written only after exact catalogue
           // proof. The stale pre-CAS candidate must never block publication or
           // the later protected-spool cleanup path.
+          throwIfAborted();
           await removeIntent(terminalCandidateOutbox, candidate.operationId);
+          throwIfAborted();
           continue;
         }
         if (
           operation.requestSha256 !== candidate.requestSha256 ||
-          operation.authoritySha256 !== candidate.authoritySha256
+          operation.authoritySha256 !== candidate.authoritySha256 ||
+          operation.runtimePrincipalSha256 !== candidate.runtimePrincipalSha256
         ) {
           summary.indeterminate += 1;
           continue;
         }
         try {
+          throwIfAborted();
           const authority = terminalCleanupAuthority(candidate);
           const authorized = await dependencies.authorizeTerminal(
             terminalAuthorizationInput(candidate),
           );
+          throwIfAborted();
           assertTerminalCleanupAuthorization({
             backup: authorized,
             authority,
             terminalErrorCode: candidate.terminalErrorCode,
           });
+          throwIfAborted();
           await persistTerminalIntent({
             outbox: terminalOutbox,
             authority,
@@ -871,21 +1088,27 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
             authorizedAt: canonicalAuthorizedAt(dependencies.now()),
             nonce: dependencies.executionToken(),
           });
+          throwIfAborted();
           await removeIntent(terminalCandidateOutbox, candidate.operationId);
+          throwIfAborted();
           summary.authorized += 1;
         } catch {
+          throwIfAborted();
           // A staged candidate is deliberately non-authorizing. Keep it until
           // the exact terminal row becomes visible or a confirmed handoff makes
           // the candidate stale.
           summary.pending += 1;
         }
       }
+      throwIfAborted();
       const terminalIntents = await listTerminalIntents(terminalOutbox, limit);
+      throwIfAborted();
       const terminalOperationIds = new Set(terminalIntents.map((intent) => intent.operationId));
-      const existingIntents = new Set(
-        (await listIntents(outbox, MAX_BATCH_SIZE)).map((intent) => intent.operationId),
-      );
+      const protectedIntents = await listIntents(outbox, MAX_BATCH_SIZE);
+      throwIfAborted();
+      const existingIntents = new Set(protectedIntents.map((intent) => intent.operationId));
       for (const operation of durable.slice(0, limit)) {
+        throwIfAborted();
         if (
           existingIntents.has(operation.operationId) ||
           terminalOperationIds.has(operation.operationId)
@@ -897,12 +1120,16 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
           continue;
         }
         try {
+          throwIfAborted();
           const candidates = await dependencies.listCandidates({
             operationId: operation.operationId,
           });
+          throwIfAborted();
           const matches: AgentBackupCaptureV3SpoolAuthority[] = [];
           for (const candidate of candidates) {
+            throwIfAborted();
             const authority = await dependencies.deriveAuthority(candidate);
+            throwIfAborted();
             if (
               authority.operationId === operation.operationId &&
               authority.requestSha256 === operation.requestSha256 &&
@@ -916,100 +1143,137 @@ export function createAgentBackupCaptureV3SpoolCleanupJanitor(
             continue;
           }
           if (matches.length !== 1) throw new Error("Protected cleanup authority is ambiguous");
-          await authorizeAndPersist(outbox, matches[0]!);
+          throwIfAborted();
+          await authorizeAndPersist(outbox, matches[0]!, signal);
+          throwIfAborted();
           await removeIntent(terminalCandidateOutbox, operation.operationId);
+          throwIfAborted();
           existingIntents.add(operation.operationId);
           summary.authorized += 1;
         } catch {
+          throwIfAborted();
           summary.indeterminate += 1;
         }
       }
 
       for (const intent of terminalIntents) {
+        throwIfAborted();
         let spool: AgentBackupCaptureV3Spool | undefined;
         try {
+          throwIfAborted();
           const authority = terminalCleanupAuthority(intent);
           const authorized = await dependencies.authorizeTerminal(
             terminalAuthorizationInput(intent),
           );
+          throwIfAborted();
           assertTerminalCleanupAuthorization({
             backup: authorized,
             authority,
             terminalErrorCode: intent.terminalErrorCode,
           });
+          throwIfAborted();
           spool = await dependencies.openExisting(config.spool, {
             operationId: intent.operationId,
             executionToken: dependencies.executionToken(),
             requestSha256: intent.requestSha256,
             authoritySha256: intent.authoritySha256,
+            runtimePrincipalSha256: intent.runtimePrincipalSha256,
           });
+          throwIfAborted();
           if (!spool) {
             await removeIntent(terminalOutbox, intent.operationId);
+            throwIfAborted();
             summary.completed += 1;
             continue;
           }
           if (spool.recordCaptured) {
             await spool.close();
+            throwIfAborted();
             summary.indeterminate += 1;
             continue;
           }
+          throwIfAborted();
           const receipt = await spool.cleanup();
+          throwIfAborted();
           if (receipt.status === "complete") {
             await removeIntent(terminalOutbox, intent.operationId);
+            throwIfAborted();
             summary.completed += 1;
           } else {
             await spool.close();
+            throwIfAborted();
             summary.pending += 1;
           }
         } catch {
+          throwIfAborted();
           if (spool) await spool.close().catch(() => undefined);
+          throwIfAborted();
           summary.pending += 1;
         }
       }
 
+      throwIfAborted();
       const protectedCleanupLimit = Math.max(0, limit - terminalIntents.length);
       const intents =
         protectedCleanupLimit > 0 ? await listIntents(outbox, protectedCleanupLimit) : [];
+      throwIfAborted();
       for (const intent of intents) {
+        throwIfAborted();
         const authority = intentAuthority(intent);
         let spool: AgentBackupCaptureV3Spool | undefined;
         try {
+          throwIfAborted();
           const authorized = await dependencies.authorize(authorizationInput(authority));
+          throwIfAborted();
           const rederived = await dependencies.deriveAuthority(authorized);
+          throwIfAborted();
           if (!sameAuthority(authority, rederived)) {
             throw new Error("Protected cleanup intent no longer matches catalogue authority");
           }
+          throwIfAborted();
           spool = await dependencies.openExisting(config.spool, {
             operationId: authority.operationId,
             executionToken: dependencies.executionToken(),
             requestSha256: authority.requestSha256,
             authoritySha256: authority.authoritySha256,
           });
+          throwIfAborted();
           if (!spool) {
             await removeIntent(outbox, authority.operationId);
+            throwIfAborted();
             await removeIntent(terminalCandidateOutbox, authority.operationId);
+            throwIfAborted();
             summary.completed += 1;
             continue;
           }
           if (!spool.recordCaptured || spool.phase !== "published") {
             await spool.close();
+            throwIfAborted();
             summary.pending += 1;
             continue;
           }
+          throwIfAborted();
           const receipt = await spool.cleanup();
+          throwIfAborted();
           if (receipt.status === "complete") {
             await removeIntent(outbox, authority.operationId);
+            throwIfAborted();
             await removeIntent(terminalCandidateOutbox, authority.operationId);
+            throwIfAborted();
             summary.completed += 1;
           } else {
             await spool.close();
+            throwIfAborted();
             summary.pending += 1;
           }
         } catch {
+          throwIfAborted();
           if (spool) await spool.close().catch(() => undefined);
+          throwIfAborted();
           summary.pending += 1;
         }
       }
+      throwIfAborted();
       return summary;
     },
   };
