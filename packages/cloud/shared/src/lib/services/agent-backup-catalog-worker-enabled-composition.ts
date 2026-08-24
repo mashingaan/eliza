@@ -13,6 +13,8 @@ import {
 } from "@elizaos/core/security/kms";
 import { AGENT_BACKUP_CAPTURE_V2_LIMITS } from "@elizaos/shared";
 import { recordCapturedAgentBackupManifest } from "../../db/repositories/agent-backup-catalog";
+import { createAccountDeletionBackupAuthority } from "./account-deletion-backup-authority";
+import { createAccountDeletionSpoolAuthority } from "./account-deletion-spool-authority";
 import {
   type AgentBackupCaptureV3LegacyWriterDrainReceipt,
   createAgentBackupCaptureV2CatalogExecutor,
@@ -21,8 +23,6 @@ import type { AgentBackupCaptureV3SpoolConfig } from "./agent-backup-capture-v2-
 import { createAgentBackupCaptureV3PublicationSourceResolver } from "./agent-backup-capture-v3-publication-source";
 import { createAgentBackupCaptureV3RuntimeContextResolver } from "./agent-backup-capture-v3-runtime-context";
 import { createAgentBackupCaptureV3SpoolCleanupJanitor } from "./agent-backup-capture-v3-spool-cleanup";
-import { createAccountDeletionBackupAuthority } from "./account-deletion-backup-authority";
-import { createAccountDeletionSpoolAuthority } from "./account-deletion-spool-authority";
 import {
   type AgentBackupCatalogRuntimeConfig,
   createAgentBackupCatalogRegistryFromEnv,

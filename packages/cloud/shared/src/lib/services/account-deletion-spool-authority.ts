@@ -10,6 +10,7 @@ import { ElizaError } from "@elizaos/core";
 import { inArray } from "drizzle-orm";
 import { dbWrite } from "../../db/helpers";
 import { agentSandboxBackups } from "../../db/schemas/agent-sandboxes";
+import type { AccountDeletionSpoolAuthority } from "./account-deletion-provider-adapters";
 import {
   type AgentBackupCaptureV3DurableOperationAuthority,
   AgentBackupCaptureV3Spool,
@@ -19,10 +20,8 @@ import {
   inspectAgentBackupOrganizationSpoolAuthorityArtifacts,
   purgeAgentBackupOrganizationSpoolAuthorityArtifacts,
 } from "./agent-backup-capture-v3-spool-cleanup";
-import type { AccountDeletionSpoolAuthority } from "./account-deletion-provider-adapters";
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export interface AccountDeletionSpoolAuthorityDependencies {
   listDurableOperations(
@@ -43,10 +42,7 @@ export interface AccountDeletionSpoolAuthorityDependencies {
     stateDirectory: string;
     organizationId: string;
   }): Promise<"absent" | "present">;
-  purgeAuthorityArtifacts(input: {
-    stateDirectory: string;
-    organizationId: string;
-  }): Promise<void>;
+  purgeAuthorityArtifacts(input: { stateDirectory: string; organizationId: string }): Promise<void>;
   executionToken(): string;
 }
 

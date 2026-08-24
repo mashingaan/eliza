@@ -4,14 +4,10 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import type {
-  AgentBackupCaptureV3DurableOperationAuthority,
-} from "./agent-backup-capture-v2-spool";
-import {
-  inspectAgentBackupOrganizationSpoolAuthorityArtifacts,
-} from "./agent-backup-capture-v3-spool-cleanup";
 import type { AccountDeletionSpoolAuthorityDependencies } from "./account-deletion-spool-authority";
 import { createAccountDeletionSpoolAuthority } from "./account-deletion-spool-authority";
+import type { AgentBackupCaptureV3DurableOperationAuthority } from "./agent-backup-capture-v2-spool";
+import { inspectAgentBackupOrganizationSpoolAuthorityArtifacts } from "./agent-backup-capture-v3-spool-cleanup";
 
 const ORGANIZATION_ID = "10000000-0000-4000-8000-000000000001";
 const OTHER_ORGANIZATION_ID = "20000000-0000-4000-8000-000000000002";

@@ -705,11 +705,7 @@ type AccountDeletionSpoolAuthorityArtifact = {
   organizationId: string;
 };
 
-function accountDeletionSpoolArtifactError(
-  code: string,
-  message: string,
-  cause?: unknown,
-): never {
+function accountDeletionSpoolArtifactError(code: string, message: string, cause?: unknown): never {
   throw new ElizaError(message, { code, cause, severity: "fatal" });
 }
 
@@ -814,10 +810,7 @@ async function listAccountDeletionSpoolAuthorityArtifacts(
       });
     }
   }
-  const terminalOutbox = await existingAuthorityOutbox(
-    stateDirectory,
-    TERMINAL_OUTBOX_DIRECTORY,
-  );
+  const terminalOutbox = await existingAuthorityOutbox(stateDirectory, TERMINAL_OUTBOX_DIRECTORY);
   if (terminalOutbox) {
     for (const intent of await listTerminalIntents(terminalOutbox, Number.MAX_SAFE_INTEGER)) {
       artifacts.push({

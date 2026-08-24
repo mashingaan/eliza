@@ -34,8 +34,7 @@ function fakeStore(provider: AgentBackupStorageProvider, initialKeys: readonly s
       ? {
           status: "present" as const,
           locator: new ObjectLocatorReceipt({
-            transport:
-              provider === "cloudflare-r2" ? "worker-r2-binding" : "s3-compatible",
+            transport: provider === "cloudflare-r2" ? "worker-r2-binding" : "s3-compatible",
             provider: provider === "cloudflare-r2" ? "r2" : "s3",
             endpointAlias: authority.endpointAlias,
             backendIdentityFingerprint: authority.endpointIdentityFingerprint,
@@ -53,8 +52,7 @@ function fakeStore(provider: AgentBackupStorageProvider, initialKeys: readonly s
       : {
           status: "absent" as const,
           locator: new ObjectLocatorReceipt({
-            transport:
-              provider === "cloudflare-r2" ? "worker-r2-binding" : "s3-compatible",
+            transport: provider === "cloudflare-r2" ? "worker-r2-binding" : "s3-compatible",
             provider: provider === "cloudflare-r2" ? "r2" : "s3",
             endpointAlias: authority.endpointAlias,
             backendIdentityFingerprint: authority.endpointIdentityFingerprint,

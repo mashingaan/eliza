@@ -5,11 +5,11 @@
  * storage, KMS, database, provider, executor, or spool authorities.
  */
 
-import type { AgentBackupCatalogRuntimeSummary } from "./agent-backup-catalog-runtime";
 import type {
   AccountDeletionBackupAuthority,
   AccountDeletionSpoolAuthority,
 } from "./account-deletion-provider-adapters";
+import type { AgentBackupCatalogRuntimeSummary } from "./agent-backup-catalog-runtime";
 
 export interface AgentBackupCatalogWorkerComposition {
   readonly enabled: boolean;

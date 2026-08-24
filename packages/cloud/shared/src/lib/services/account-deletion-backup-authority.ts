@@ -12,8 +12,7 @@ import type {
 } from "../storage/agent-backup-object-store";
 import type { AccountDeletionBackupAuthority } from "./account-deletion-provider-adapters";
 
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_LIST_PAGES = 100_000;
 
 function authorityError(code: string, message: string, cause?: unknown): never {
