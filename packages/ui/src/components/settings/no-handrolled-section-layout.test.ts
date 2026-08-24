@@ -63,6 +63,10 @@ const SECTION_LAYOUT_ALLOWLIST = new Map<string, string>([
     "DesktopSettingsNavigation.tsx",
     "desktop settings rail, not a section body",
   ],
+  [
+    "DevicesRuntimesContainer.tsx",
+    "live-state adapter; grouping lives in DevicesRuntimesSection",
+  ],
   ["SettingsHubList.tsx", "mobile settings hub, not a section body"],
   ["ProviderCard.tsx", "selectable provider chip/tile, not a section body"],
   [

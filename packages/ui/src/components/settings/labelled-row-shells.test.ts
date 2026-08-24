@@ -16,11 +16,17 @@ function read(rel: string): string {
 
 describe("labelled settings-row shells use SettingsRow", () => {
   it("privacy DSR cards are SettingsRows and keep the delete trigger", () => {
-    const source = read("cloud/account-security/components/privacy-panel.tsx");
-    expect(source).toContain("<SettingsRow");
-    expect(source).toContain("Download my data");
-    expect(source).toContain('data-testid="delete-account-trigger"');
-    expect(source).not.toContain("BrandCard");
+    const panelSource = read(
+      "cloud/account-security/components/privacy-panel.tsx",
+    );
+    const dialogSource = read(
+      "cloud/account-security/components/account-deletion-dialog.tsx",
+    );
+    expect(panelSource).toContain("<SettingsRow");
+    expect(panelSource).toContain("Download my data");
+    expect(panelSource).toContain("<AccountDeletionDialog");
+    expect(dialogSource).toContain('data-testid="delete-account-trigger"');
+    expect(panelSource).not.toContain("BrandCard");
   });
 
   it("local session and access-info rows use SettingsRow", () => {

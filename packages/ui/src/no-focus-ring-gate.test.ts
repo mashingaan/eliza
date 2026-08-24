@@ -11,7 +11,7 @@ const SRC_ROOT = import.meta.dirname;
 
 const APPROVED_FOCUS_UTILITIES = new Map([
   [
-    "components/shell/HomePill.tsx",
+    "components/ui/button.tsx",
     new Set([
       "focus-visible:bg-transparent",
       "focus-visible:ring-2",
@@ -95,5 +95,8 @@ describe("no focus/ring utility gate", () => {
         ),
       ),
     );
+    expect(
+      readFileSync(join(SRC_ROOT, "components/shell/HomePill.tsx"), "utf8"),
+    ).toContain('variant="homePill"');
   });
 });

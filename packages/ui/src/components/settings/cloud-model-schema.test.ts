@@ -40,7 +40,10 @@ describe("cloud-model-schema", () => {
     const { schema, hints } = buildCloudModelSchema(options);
     expect(schema.type).toBe("object");
     expect(schema.properties.nano).toBeDefined();
-    expect(hints.nano.options.length).toBe(1);
+    const nanoOptions = hints.nano.options;
+    expect(nanoOptions).toBeDefined();
+    if (!nanoOptions) throw new Error("Expected nano model options");
+    expect(nanoOptions).toHaveLength(1);
     expect(hints.responseHandler).toBeDefined();
     expect(hints.actionPlanner).toBeDefined();
   });

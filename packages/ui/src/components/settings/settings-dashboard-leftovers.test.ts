@@ -34,6 +34,10 @@ const SETTINGS_MOUNTED_DIRS = [
  */
 const BRANDCARD_ALLOWLIST = new Map<string, string>([
   [
+    "cloud/billing/components/active-compute-card.tsx",
+    "read-only compute cost dashboard with resource and observation states",
+  ],
+  [
     "cloud/billing/components/auto-top-up-card.tsx",
     "billing multi-field editor (switch + amounts + save)",
   ],
