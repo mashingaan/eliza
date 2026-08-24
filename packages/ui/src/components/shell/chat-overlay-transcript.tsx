@@ -124,11 +124,10 @@ export function renderOverlayMessageBody(
           {message.text}
         </div>
         <Button
-          variant="ghost"
-          size="sm"
+          variant="outlineMuted"
+          size="pill"
           data-testid="chat-no-provider-settings"
           onClick={() => onOpenSettings?.()}
-          className="h-auto rounded-full border border-border-strong bg-surface px-3 py-1.5 text-sm-tight font-medium text-txt transition-colors hover:bg-bg-hover"
         >
           Open Settings
         </Button>
@@ -152,11 +151,10 @@ export function renderOverlayMessageBody(
           {message.text}
         </div>
         <Button
-          variant="ghost"
-          size="sm"
+          variant="outlineMuted"
+          size="pill"
           data-testid="chat-insufficient-credits-add"
           onClick={() => onOpenSettings?.()}
-          className="h-auto rounded-full border border-border-strong bg-surface px-3 py-1.5 text-sm-tight font-medium text-txt transition-colors hover:bg-bg-hover"
         >
           Add credits
         </Button>
