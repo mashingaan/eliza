@@ -1,9 +1,8 @@
 /*
  * face_nms.c — IoU-based non-maximum suppression for face detections.
  *
- * Mirrors the structure of `packages/native-plugins/yolo-cpp/src/yolo_nms.c`
- * but operates on `face_detection` records (which carry landmarks
- * in addition to the bbox + confidence).
+ * Operates on `face_detection` records, which carry landmarks in addition
+ * to the bounding box and confidence.
  *
  * BlazeFace's MediaPipe reference uses weighted-NMS (overlapping
  * boxes are averaged rather than discarded). For the first pass we
