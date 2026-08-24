@@ -1,6 +1,6 @@
 # Account deletion lifecycle status
 
-Updated: 2026-08-22 (America/Los_Angeles)
+Updated: 2026-08-23 (America/Los_Angeles)
 
 ## Done
 
@@ -116,3 +116,42 @@ Updated: 2026-08-22 (America/Los_Angeles)
 - Android must consume and verify the stable nonterminal `canceling` contract before Play-facing acceptance; this lane did not mutate Android or claim Play acceptance.
 - Independent Cloud, Security, SRE, Steward, billing, and provider-owner review.
 - No production deployment, migration, push, merge, or real-user deletion is authorized.
+
+## 2026-08-23 current-base backup/spool authority checkpoint
+
+### Done
+
+- Preserved the previously clean lifecycle head `301170f8cd9e44445d1609a5bc7a074cc184b8eb` and its existing tags. The broad 5,134-entry index overlay was the deliberate in-progress merge of upstream `49e937cd3dc5ba0cb5d4252815d09c8a38c7f92a`, not an unclassified user checkout: `MERGE_HEAD` named that exact commit, the index had zero unmerged paths, and the resulting candidate tree differed from the upstream merge parent in only 76 lifecycle-owned paths.
+- Committed the semantic recompose and authority slice as merge checkpoint `53d2276c6fb1a31f843ad7b67df396b45818e9a6` with parents `301170f8cd9e44445d1609a5bc7a074cc184b8eb` and `49e937cd3dc5ba0cb5d4252815d09c8a38c7f92a`. Conflict resolutions reused reviewed response-loss/admission-capability content from `5f700fdffffd7505b10f77d6be6a695e3e7b136f` by exact file content where applicable; the fail-closed fence was not reverted.
+- Merged the two later, zero-overlap upstream commits normally. Exact current-base source is `5baee99d1bdfc3ab4b402515f648e98ce1afdaab`, tree `40ded85ae448f27459b7cc8c363b156b5e1ab80e`, parents `53d2276c6fb1a31f843ad7b67df396b45818e9a6` and exact `origin/develop@6cc570c8efa9000a163df5b37487898551c64d29`. Local annotated tag: `account-deletion-backup-spool-authority-current-base-20260823`.
+- Patch isolation against that exact base is 76 paths with stable patch ID `cc31e3e1177247d6971a580a2f7670a6bc5d7995`. No Android-native path is changed.
+- Added a canonical remote-backup deletion authority over the exact immutable `AgentBackupObjectStoreRegistry`. It requires both Cloudflare R2 and Hetzner authorities, enumerates the exact `agent-sandbox-backups/v2/<organization-id>/` prefix on both providers (including orphan objects without catalogue rows), bounds and validates pagination, deletes by exact observed locator, and reconciles an ambiguous/lost response by inspecting before any retry.
+- Added a node-local `AccountDeletionSpoolAuthority` composed from the backup worker's exact persistent spool configuration. Every durable operation is classified through its primary-database `backup_operation_id -> catalog_organization_id` reservation before mutation; missing/ambiguous classification, an unavailable/nonpersistent/symlinked StateDirectory, active writers, locks, or unsafe outbox entries fail closed.
+- The dedicated backup worker now composes the deletion backup and spool authorities from the same pinned registry and spool config used by publication/janitor work. The disabled worker remains disabled-first and does not initialize provider authority.
+- Reordered `spools` before `secondary_backups`, because spool classification needs the authoritative backup catalogue rows; only after provider/spool absence is proven may the local backup graph be removed.
+- Corrected the pending spool cleanup boundary to release operation authority exactly once. A completed cleanup already releases its durable lock; a pending/failed cleanup releases in the typed catch and remains retryable.
+- Migration relationship is preserved and append-only: `0312_account_deletion_lifecycle_authority`, `0313_account_deletion_phase_receipts`, `0314_account_deletion_exports`, `0315_account_deletion_canceling_state`, and `0316_account_deletion_admission_recovery` follow upstream `0311`; this authority-composition slice adds no migration.
+
+### Tests and evidence
+
+- `git diff --check` passed before both source commits; there are no unresolved paths. Sixteen affected source/test files transpile successfully with Bun `--no-bundle --target=bun` syntax checks. The disposable syntax output is `/tmp/account-deletion-syntax-check` (448 KiB) and may be reclaimed without touching repository evidence.
+- Current-range redacted Gitleaks passed at `5baee99d1bdfc3ab4b402515f648e98ce1afdaab`: 23 commits and approximately 401.68 KiB scanned, no leaks found.
+- The focused five-file Bun test run did not execute an assertion because this worktree has no root `node_modules` and package-local workspace links resolve into the missing root install. Module loading failed for `@aws-sdk/client-s3`, `drizzle-orm`, and transitive `handlebars`. Root Biome and package TypeScript executables are likewise unavailable. Per the disk/no-install gate, dependencies were not installed and no green focused-test or typecheck claim is made for this exact source.
+- Earlier focused lifecycle, PGlite, provider-saga, UI, MinIO, and security receipts above remain historical evidence for their exact older checkpoint only. They are not represented as same-SHA hosted proof for this recompose.
+- No staging, hosted database, object store, spool, external provider, production, or real-account mutation occurred. No push or PR mutation occurred in this slice.
+
+### Doing
+
+- Source composition is complete and parked at the exact local tag. The remaining runtime seam is serialization: the Cloudflare due worker cannot own the node-local spool filesystem. Shared must run the backup/spool phases through the dedicated backup-host composition (or an independently reviewed durable transport) and must never inject a generic blob binding or a fabricated absence response.
+- Draft-PR handoff for issue #23098 is source-ready but not publication-ready until the exact dependency-backed focused tests/typechecks run, Shared confirms the serialized execution source, and independent reviewers approve the authority boundary.
+
+### Next: Shared disposable staging checklist
+
+1. Restore the pinned workspace dependencies without duplicating artifacts, then run the five focused authority/adapter/composition suites, Cloud shared typecheck, focused Biome, migration journal/application tests, and `git diff --check` against exact source `5baee99d1bdfc3ab4b402515f648e98ce1afdaab`.
+2. Shared, as the exclusive release writer, stages only that reviewed source (or records a new exact composition SHA) in an isolated disposable nonproduction environment. Apply migrations `0312`-`0316` through the guarded migration path and capture health, migration, and rollback receipts; do not start a competing Cloudflare/Railway deployment.
+3. Configure one exact Cloudflare R2 primary authority and one exact Hetzner secondary authority in the canonical `AgentBackupObjectStoreRegistry`. The dedicated backup host must mount the same exact persistent, non-temporary spool StateDirectory used by its worker and expose the composed `accountDeletionAuthorities` to the deletion saga through a reviewed durable boundary. Missing authority remains actionable failure, never absence.
+4. Seed only a disposable personal tenant plus a two-owner shared tenant: catalogue-backed objects and orphan exact-prefix objects in both stores; another tenant and substring-lookalike prefixes; sealed/unpublished and published spools; protected and terminal outbox/candidate intents; subscription/auto-top-up, agents/apps/containers, connector/voice credentials, domains, files/media, Vault/key bindings, and grants.
+5. Prove shared exit requires an active successor and preserves shared billing/assets. For personal deletion, exercise app and public request, exact reauth/confirmation, durable recovery-package acknowledgement before fencing, post-session status, export/digest verification, cancellation/reactivation, recovery expiry, and provider failure/resume.
+6. Inject a lost response after each provider object deletion and spool cleanup. On restart, inspect canonical state first; never repeat an ambiguous purge. Prove stale generations/callbacks cannot mutate the new lifecycle revision, active locks/in-flight writes/unmounted StateDirectory/unknown journal classification all fail closed, and `spools` completes before the backup catalogue graph is erased.
+7. Verify exact final absence: the target prefix is empty in R2 and Hetzner; no target durable spool operation or cleanup outbox/candidate remains on the mounted authority; the other tenant remains byte-for-byte present; PostgreSQL identifiers and tenant rows are transactionally erased/nullified with only the bounded anonymous receipt retained; primary blob storage, Steward, billing, compute, GitHub, connectors, voice, domains, Vault/keys, and discovered grants are absent.
+8. Capture exact health, database/provider phase receipts, redacted logs, source/digest provenance, rollback steps, and independent Cloud, Security, SRE, Steward, billing, backup/spool, and provider-owner review. Production, real-user deletion, merge, and release remain separate approval gates.
