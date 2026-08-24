@@ -568,7 +568,7 @@ export const InlinePluginConfig = memo(function InlinePluginConfig({
           {modes.map((mode) => {
             const active = mode.id === selectedModeId;
             return (
-              <button
+              <Button
                 key={mode.id}
                 type="button"
                 aria-pressed={active}
@@ -585,7 +585,7 @@ export const InlinePluginConfig = memo(function InlinePluginConfig({
                 }`}
               >
                 {mode.label}
-              </button>
+              </Button>
             );
           })}
         </div>
@@ -613,7 +613,7 @@ export const InlinePluginConfig = memo(function InlinePluginConfig({
                 })}
           </Button>
           {apiKeyModeId && (
-            <button
+            <Button
               type="button"
               onClick={() => {
                 setModeChoice(apiKeyModeId);
@@ -625,7 +625,7 @@ export const InlinePluginConfig = memo(function InlinePluginConfig({
               {t("messagecontent.OAuthUseApiKey", {
                 defaultValue: "Use an API key / local setup instead",
               })}
-            </button>
+            </Button>
           )}
         </div>
       )}
@@ -896,13 +896,13 @@ export function MessageUiSpecBlock({
               <span className="font-semibold text-destructive">
                 Couldn't render this widget.
               </span>{" "}
-              <button
+              <Button
                 type="button"
                 className="underline underline-offset-2"
                 onClick={() => setShowRaw((v) => !v)}
               >
                 {showRaw ? "Hide JSON" : "View JSON"}
-              </button>
+              </Button>
             </div>
           )}
         >
