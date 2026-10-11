@@ -199,7 +199,6 @@ describe("listInboxAction", () => {
     expect(result.text).toContain("non-empty supported message source");
     expect(result.data?.messages).toBeUndefined();
   });
-
   it("validates messaging contexts and rejects unrelated contexts", async () => {
     const message = { content: { text: "show inbox" } } as never;
     const runtime = createFakeRuntime();
