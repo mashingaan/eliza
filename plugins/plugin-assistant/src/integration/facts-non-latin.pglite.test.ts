@@ -40,7 +40,10 @@ async function createMigratedAdapter(
   return adapter;
 }
 
-function createRuntime(fact: string): AgentRuntime {
+function createRuntime(
+  fact: string,
+  relationship?: Record<"subject" | "predicate" | "object", string>,
+): AgentRuntime {
   const character: Character = {
     name: "Eliza",
     bio: ["Test"],
@@ -63,7 +66,7 @@ function createRuntime(fact: string): AgentRuntime {
             name: FACTS_AND_RELATIONSHIPS_TOOL_NAME,
             arguments: {
               facts: [{ subject: "user", fact }],
-              relationships: [],
+              relationships: relationship ? [relationship] : [],
               thought: "new durable fact about the speaker",
             },
           },
@@ -138,5 +141,68 @@ describe("facts stage keeps facts written in non-Latin scripts", () => {
       count: 10,
     });
     expect(rows.map((row) => row.content.text)).toEqual([fact]);
+  });
+
+  it("persists non-Latin relationship predicates", async () => {
+    const relationship = {
+      subject: "user",
+      predicate: "好き",
+      object: "agent",
+    };
+    const runtime = createRuntime("私は緑茶が好きです", relationship);
+    runtimes.push(runtime);
+    runtime.registerDatabaseAdapter(
+      await createMigratedAdapter(runtime.agentId),
+    );
+    await runtime.initialize({ skipMigrations: true });
+
+    const userId = uuidv4() as UUID;
+    const roomId = uuidv4() as UUID;
+    const worldId = uuidv4() as UUID;
+    await runtime.ensureConnection({
+      entityId: userId,
+      roomId,
+      worldId,
+      worldName: "Home",
+      roomName: "chat",
+      userName: "minji",
+      name: "Minji",
+      source: "discord",
+      type: ChannelType.GROUP,
+      channelId: "chat-channel",
+    });
+
+    const statement: Memory = {
+      id: uuidv4() as UUID,
+      entityId: userId,
+      agentId: runtime.agentId,
+      roomId,
+      worldId,
+      content: {
+        text: "私は緑茶が好きです",
+        source: "discord",
+        senderName: "Minji",
+      },
+      createdAt: Date.now(),
+    };
+    await runtime.createMemory(statement, "messages");
+
+    const stage = await runFactsAndRelationshipsStage({
+      runtime,
+      message: statement,
+      state: { values: {}, data: {}, text: "" } as State,
+      extract: { facts: [], relationships: [relationship] },
+    });
+
+    expect(stage.written.relationships).toBe(1);
+    const rows = await runtime.getMemories({
+      tableName: "facts",
+      roomId,
+      count: 10,
+    });
+    const relationshipRows = rows.filter(
+      (row) => row.content.predicate === relationship.predicate,
+    );
+    expect(relationshipRows).toHaveLength(1);
   });
 });
