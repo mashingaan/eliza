@@ -212,18 +212,19 @@ function extractUrlsFromValue(val: string): string[] {
 
 function collectStrings(obj: unknown, out: Set<string>) {
   if (typeof obj === "string") {
-    const value = obj.trim()
+    const value = obj.trim();
     if (looksLikePotentialMediaUrl(value)) {
-      out.add(value)
-      return
+      out.add(value);
+      return;
     }
     const absoluteUrls = value.match(
       /(?:https?:\/\/|file:\/\/|blob:|capacitor:\/\/|electrobun:\/\/|app:\/\/)[^\s"'<>]+/gi,
-    )
+    );
     for (const url of absoluteUrls ?? []) {
-      out.add(url)
+      const cleanUrl = url.replace(/[)\]},.!?]+$/, "");
+      if (cleanUrl) out.add(cleanUrl);
     }
-    return
+    return;
   }
   if (Array.isArray(obj)) {
     for (const item of obj) collectStrings(item, out);

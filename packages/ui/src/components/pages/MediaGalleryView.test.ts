@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest"
-import { extractMediaFromRows } from "./MediaGalleryView"
+import { describe, expect, it } from "vitest";
+import { extractMediaFromRows } from "./MediaGalleryView";
 
 describe("extractMediaFromRows", () => {
   it("extracts media URLs from object-valued jsonb content", () => {
@@ -13,21 +13,21 @@ describe("extractMediaFromRows", () => {
         },
       ],
       "memories",
-    )
+    );
 
     expect(items.map((item) => item.url)).toEqual([
       "https://cdn.example.com/photo.png",
-    ])
-  })
+    ]);
+  });
 
   it("does not turn prose filenames into gallery items", () => {
     const items = extractMediaFromRows(
       [{ content: { text: "I saved logo.png for the header" } }],
       "memories",
-    )
+    );
 
-    expect(items).toEqual([])
-  })
+    expect(items).toEqual([]);
+  });
 
   it("keeps absolute media URLs in prose", () => {
     const items = extractMediaFromRows(
@@ -39,10 +39,28 @@ describe("extractMediaFromRows", () => {
         },
       ],
       "memories",
-    )
+    );
 
     expect(items.map((item) => item.url)).toEqual([
       "https://cdn.example.com/photo.png",
-    ])
-  })
-})
+    ]);
+  });
+
+  it("keeps JSONB prose URLs when sentence punctuation follows", () => {
+    const items = extractMediaFromRows(
+      [
+        {
+          content: {
+            text: "See https://cdn.example.com/photo.png. The link (https://cdn.example.com/diagram.jpg) is ready",
+          },
+        },
+      ],
+      "memories",
+    );
+
+    expect(items.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/photo.png",
+      "https://cdn.example.com/diagram.jpg",
+    ]);
+  });
+});
