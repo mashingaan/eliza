@@ -94,7 +94,10 @@ function isNullable(prop?: JsonSchemaProperty): boolean {
   if (prop.enum && !prop.enum.some((value) => value === null)) return false;
   if (prop.const !== undefined && prop.const !== null) return false;
   if (prop.allOf && !prop.allOf.every((v) => isNullable(v))) return false;
-  if (prop.oneOf && !prop.oneOf.some((v) => isNullable(v))) return false;
+  // oneOf requires exactly one branch to match, so null is acceptable only
+  // when exactly one branch accepts it; two nullable branches make null
+  // ambiguous and must be rejected.
+  if (prop.oneOf && prop.oneOf.filter((v) => isNullable(v)).length !== 1) return false;
   if (prop.anyOf && !prop.anyOf.some((v) => isNullable(v))) return false;
   return true;
 }
